@@ -282,6 +282,38 @@ pub fn draw_handle(pixmap: &mut Pixmap, center: Point, color: Color) {
     );
 }
 
+pub fn draw_plus_handle(pixmap: &mut Pixmap, center: Point) {
+    let color = Color::from_rgba8(45, 205, 86, 245);
+    let half = 8.0;
+    let width = 2.4;
+    stroke_line(
+        pixmap,
+        Point {
+            x: center.x - half,
+            y: center.y,
+        },
+        Point {
+            x: center.x + half,
+            y: center.y,
+        },
+        width,
+        color,
+    );
+    stroke_line(
+        pixmap,
+        Point {
+            x: center.x,
+            y: center.y - half,
+        },
+        Point {
+            x: center.x,
+            y: center.y + half,
+        },
+        width,
+        color,
+    );
+}
+
 pub fn draw_text_panel(
     pixmap: &mut Pixmap,
     text: &str,
@@ -360,14 +392,23 @@ pub fn draw_arc(
     }
 }
 
-pub fn render_angle_measure(width: u32, height: u32, points: [Point; 3]) -> Pixmap {
+pub fn render_angle_measure(
+    width: u32,
+    height: u32,
+    points: [Point; 3],
+    inverted: bool,
+) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap allocation");
     pixmap.fill(Color::TRANSPARENT);
 
     let a = points[0];
     let vertex = points[1];
     let b = points[2];
-    let line = Color::from_rgba8(25, 25, 25, 220);
+    let line = if inverted {
+        Color::from_rgba8(255, 255, 255, 235)
+    } else {
+        Color::from_rgba8(25, 25, 25, 220)
+    };
     stroke_line(&mut pixmap, vertex, a, 1.5, line);
     stroke_line(&mut pixmap, vertex, b, 1.5, line);
     draw_handle(&mut pixmap, a, Color::from_rgba8(255, 70, 70, 235));
