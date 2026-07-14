@@ -1094,25 +1094,57 @@ impl App {
         let Some(helper) = self.helper_point else {
             return;
         };
-        let midpoint = Point {
-            x: (self.points[0].x + self.points[2].x) * 0.5,
-            y: (self.points[0].y + self.points[2].y) * 0.5,
-        };
-        let dx = helper.x - midpoint.x;
-        let dy = helper.y - midpoint.y;
 
-        // Translate the complete base angle. The green plus stays fixed, while
-        // the hypotenuse midpoint is placed exactly over it.
-        for point in &mut self.points {
-            point.x += dx;
-            point.y += dy;
+        // Two closed locks freeze the red system completely. A double click
+        // must not rotate or rebuild it until one of the locks is opened.
+        if self.both_locks_closed() {
+            return;
         }
+
+        let vertex = self.points[1];
+        let signed_angle = self.current_signed_angle();
+        let half_angle = signed_angle * 0.5;
+        let centre_distance = vector_length(vertex, helper);
+        let projection = half_angle.cos().abs();
+
+        if centre_distance < EPSILON || projection < EPSILON {
+            return;
+        }
+
+        // Keep the blue vertex fixed. For two equally long red rays, the
+        // midpoint of the hypotenuse lies on the angle bisector at
+        // radius * cos(angle / 2). Rebuild the two red points around the fixed
+        // blue vertex so that this midpoint coincides with the green plus.
+        // Do not translate the blue vertex and do not clamp the reconstructed
+        // radius: clamping would move the hypotenuse midpoint away from the
+        // requested green-plus position. The equality below therefore remains
+        // exact for the current angle.
+        let radius = centre_distance / projection;
+        if !radius.is_finite() {
+            return;
+        }
+        let centre_angle = vector_angle(vertex, helper);
+        self.points[0] = point_from_polar(
+            vertex,
+            centre_angle - signed_angle * 0.5,
+            radius,
+        );
+        self.points[2] = point_from_polar(
+            vertex,
+            centre_angle + signed_angle * 0.5,
+            radius,
+        );
+
         if self.angle_locked {
-            self.locked_signed_angle = self.current_signed_angle();
+            self.locked_signed_angle = signed_angle;
         }
         self.fit_window_to_content();
         self.save_state();
         self.request_redraw();
+    }
+
+    fn both_locks_closed(&self) -> bool {
+        self.angle_locked && self.red_locked_index.is_some()
     }
 
     fn toggle_red_lock(&mut self, index: usize) {
@@ -1493,6 +1525,9 @@ impl App {
     }
 
     fn adjust_angle_by_degrees(&mut self, delta_deg: f32) {
+        if self.both_locks_closed() {
+            return;
+        }
         let vertex = self.points[1];
         let current_signed = self.current_signed_angle();
         let current_abs_deg = current_signed.abs().to_degrees();
@@ -1516,6 +1551,9 @@ impl App {
     }
 
     fn rotate_red_system_by_degrees(&mut self, visual_degrees: f32) {
+        if self.both_locks_closed() {
+            return;
+        }
         let vertex = self.points[1];
         // Screen Y grows downward, therefore negative mathematical rotation is
         // counter-clockwise on screen.
@@ -1529,6 +1567,9 @@ impl App {
 
 
     fn rotate_about_red_lock_by_degrees(&mut self, index: usize, visual_degrees: f32) {
+        if self.both_locks_closed() {
+            return;
+        }
         if index != 0 && index != 2 {
             return;
         }
@@ -1790,6 +1831,15 @@ impl ApplicationHandler for App {
                 let wheel_units = Self::wheel_units(delta);
 
                 if self.distance_panel_at(cursor).is_some() {
+                    return;
+                }
+
+                // When both the blue and a red lock are closed, the angle and
+                // absolute orientation are frozen. No wheel target may rotate
+                // or open the construction, including the degree label.
+                if self.both_locks_closed() {
+                    self.angle_wheel_accumulator = 0.0;
+                    self.rotation_wheel_accumulator = 0.0;
                     return;
                 }
 
@@ -2102,30 +2152,16 @@ impl App {
             return;
         }
 
-        if self.angle_locked {
-            if let Some(red_index) = self.red_locked_index {
-                let other_index = if red_index == 0 { 2 } else { 0 };
-                let fixed_angle = vector_angle(vertex, self.points[red_index]);
-
-                if index == red_index {
-                    // Both locks closed: the locked ray keeps its absolute
-                    // direction. Dragging it changes only the shared length.
-                    let other_angle = vector_angle(vertex, self.points[other_index]);
-                    self.points[red_index] =
-                        point_from_polar(vertex, fixed_angle, moved_radius);
-                    self.points[other_index] =
-                        point_from_polar(vertex, other_angle, moved_radius);
-                } else {
-                    // The opposite red point may change the opening angle, but
-                    // the locked red ray remains fixed in the screen coordinate
-                    // system. Both red rays retain the same length.
-                    self.points[index] = moved;
-                    self.points[red_index] =
-                        point_from_polar(vertex, fixed_angle, moved_radius);
-                    self.locked_signed_angle = self.current_signed_angle();
-                }
-                return;
-            }
+        if self.both_locks_closed() {
+            // Both locks closed: neither red ray may rotate and the angle may
+            // not change. Dragging either red point only adjusts the common
+            // length along the two already established absolute directions.
+            let left_angle = vector_angle(vertex, self.points[0]);
+            let right_angle = vector_angle(vertex, self.points[2]);
+            self.points[0] = point_from_polar(vertex, left_angle, moved_radius);
+            self.points[2] = point_from_polar(vertex, right_angle, moved_radius);
+            self.locked_signed_angle = self.current_signed_angle();
+            return;
         }
 
         if !self.angle_locked {
