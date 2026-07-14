@@ -19,6 +19,7 @@ use winit::window::Window;
 
 pub const MENU_MINIMIZE: u32 = 1;
 pub const MENU_CLOSE: u32 = 2;
+pub const MENU_POINT: u32 = 3;
 
 pub fn hwnd_from_window(window: &Window) -> HWND {
     match window.window_handle().expect("window handle").as_raw() {
@@ -69,8 +70,12 @@ pub unsafe fn restore_window(hwnd: HWND) {
 
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() }
 
-pub unsafe fn show_context_menu(hwnd: HWND) -> Option<u32> {
+pub unsafe fn show_context_menu(hwnd: HWND, point_item_label: Option<&str>) -> Option<u32> {
     let menu: HMENU = CreatePopupMenu().ok()?;
+    if let Some(label) = point_item_label {
+        let item = wide(label);
+        let _ = AppendMenuW(menu, MF_STRING, MENU_POINT as usize, PCWSTR(item.as_ptr()));
+    }
     let minimize = wide("Згорнути");
     let close = wide("Закрити");
     let _ = AppendMenuW(menu, MF_STRING, MENU_MINIMIZE as usize, PCWSTR(minimize.as_ptr()));

@@ -1,4 +1,6 @@
-use crate::text::{draw_text, layout_text};
+use std::f32::consts::PI;
+
+use crate::text::{draw_text, layout_text, TextLayout};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 #[derive(Clone, Copy, Debug)]
@@ -8,7 +10,7 @@ pub struct Point {
 }
 
 pub const HANDLE_RADIUS: f32 = 10.5;
-const LABEL_FONT_SIZE: f32 = 16.5;
+pub const LABEL_FONT_SIZE: f32 = 16.5;
 const LABEL_PAD_X: f32 = 10.0;
 const LABEL_PAD_Y: f32 = 7.0;
 const LABEL_MIN_HEIGHT: f32 = 28.0;
@@ -41,6 +43,17 @@ pub fn angle_between(a: Point, vertex: Point, b: Point) -> f32 {
         .to_degrees()
 }
 
+fn normalize_signed_angle(angle: f32) -> f32 {
+    let mut normalized = angle;
+    while normalized > PI {
+        normalized -= 2.0 * PI;
+    }
+    while normalized < -PI {
+        normalized += 2.0 * PI;
+    }
+    normalized
+}
+
 fn label_center(a: Point, vertex: Point, b: Point) -> (f32, f32) {
     let ax = a.x - vertex.x;
     let ay = a.y - vertex.y;
@@ -61,12 +74,27 @@ fn label_center(a: Point, vertex: Point, b: Point) -> (f32, f32) {
     (vertex.x + dx * 35.0, vertex.y + dy * 35.0)
 }
 
-pub fn label_metrics(a: Point, vertex: Point, b: Point) -> (f32, f32, f32, f32) {
-    let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
-    let layout = layout_text(&label, LABEL_FONT_SIZE);
-    let (cx, cy) = label_center(a, vertex, b);
+pub fn panel_metrics_for_text(text: &str) -> (TextLayout, f32, f32) {
+    let layout = layout_text(text, LABEL_FONT_SIZE);
     let width = layout.width + 2.0 * LABEL_PAD_X;
     let height = (layout.height + 2.0 * LABEL_PAD_Y).max(LABEL_MIN_HEIGHT);
+    (layout, width, height)
+}
+
+pub fn text_panel_rect(text: &str, cx: f32, cy: f32) -> PanelRect {
+    let (_, width, height) = panel_metrics_for_text(text);
+    PanelRect {
+        x: cx - width * 0.5,
+        y: cy - height * 0.5,
+        width,
+        height,
+    }
+}
+
+pub fn label_metrics(a: Point, vertex: Point, b: Point) -> (f32, f32, f32, f32) {
+    let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
+    let (_, width, height) = panel_metrics_for_text(&label);
+    let (cx, cy) = label_center(a, vertex, b);
     (width, height, cx, cy)
 }
 
@@ -182,7 +210,7 @@ pub fn fill_rounded_rect(
     );
 }
 
-fn stroke_line(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: Color) {
+pub fn stroke_line(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: Color) {
     let mut builder = PathBuilder::new();
     builder.move_to(from.x, from.y);
     builder.line_to(to.x, to.y);
@@ -203,7 +231,23 @@ fn stroke_line(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: C
     }
 }
 
-fn draw_handle(pixmap: &mut Pixmap, center: Point, color: Color) {
+fn stroke_line_path(pixmap: &mut Pixmap, path: &Path, width: f32, color: Color) {
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.stroke_path(
+        path,
+        &paint,
+        &Stroke {
+            width,
+            ..Default::default()
+        },
+        Transform::identity(),
+        None,
+    );
+}
+
+pub fn draw_handle(pixmap: &mut Pixmap, center: Point, color: Color) {
     let mut outer = PathBuilder::new();
     outer.push_circle(center.x, center.y, HANDLE_RADIUS);
     let mut paint = Paint::default();
@@ -238,20 +282,82 @@ fn draw_handle(pixmap: &mut Pixmap, center: Point, color: Color) {
     );
 }
 
-fn stroke_line_path(pixmap: &mut Pixmap, path: &Path, width: f32, color: Color) {
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-    pixmap.stroke_path(
-        path,
-        &paint,
-        &Stroke {
-            width,
-            ..Default::default()
-        },
-        Transform::identity(),
-        None,
+pub fn draw_text_panel(
+    pixmap: &mut Pixmap,
+    text: &str,
+    cx: f32,
+    cy: f32,
+    background: Color,
+    foreground: Color,
+) -> PanelRect {
+    let (layout, width, height) = panel_metrics_for_text(text);
+    let panel = PanelRect {
+        x: cx - width * 0.5,
+        y: cy - height * 0.5,
+        width,
+        height,
+    };
+    fill_rounded_rect(
+        pixmap,
+        panel.x,
+        panel.y,
+        panel.width,
+        panel.height,
+        LABEL_RADIUS,
+        background,
     );
+    let text_x = cx - (layout.xmin + layout.xmax) * 0.5;
+    let baseline = cy + (layout.ymin + layout.ymax) * 0.5;
+    draw_text(pixmap, text, text_x, baseline, LABEL_FONT_SIZE, foreground);
+    panel
+}
+
+pub fn draw_arc(
+    pixmap: &mut Pixmap,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+    width: f32,
+    color: Color,
+) {
+    if radius <= 0.0 {
+        return;
+    }
+    let delta = normalize_signed_angle(end_angle - start_angle);
+    if delta.abs() < 0.001 {
+        return;
+    }
+
+    let steps = ((delta.abs() * radius) / 8.0).ceil().max(8.0) as usize;
+    let mut builder = PathBuilder::new();
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let angle = start_angle + delta * t;
+        let x = center.x + radius * angle.cos();
+        let y = center.y + radius * angle.sin();
+        if step == 0 {
+            builder.move_to(x, y);
+        } else {
+            builder.line_to(x, y);
+        }
+    }
+
+    if let Some(path) = builder.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &Stroke {
+                width,
+                ..Default::default()
+            },
+            Transform::identity(),
+            None,
+        );
+    }
 }
 
 pub fn render_angle_measure(width: u32, height: u32, points: [Point; 3]) -> Pixmap {
@@ -273,29 +379,15 @@ pub fn render_angle_measure(width: u32, height: u32, points: [Point; 3]) -> Pixm
     );
 
     let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
-    let layout = layout_text(&label, LABEL_FONT_SIZE);
     let panel = label_panel_rect(points);
     let cx = panel.x + panel.width * 0.5;
     let cy = panel.y + panel.height * 0.5;
-
-    fill_rounded_rect(
-        &mut pixmap,
-        panel.x,
-        panel.y,
-        panel.width,
-        panel.height,
-        LABEL_RADIUS,
-        Color::from_rgba8(255, 255, 255, 148),
-    );
-
-    let text_x = cx - (layout.xmin + layout.xmax) * 0.5;
-    let baseline = cy + (layout.ymin + layout.ymax) * 0.5;
-    draw_text(
+    draw_text_panel(
         &mut pixmap,
         &label,
-        text_x,
-        baseline,
-        LABEL_FONT_SIZE,
+        cx,
+        cy,
+        Color::from_rgba8(255, 255, 255, 148),
         Color::from_rgba8(18, 18, 18, 248),
     );
 

@@ -8,10 +8,14 @@ mod win32_layered;
 use std::f32::consts::PI;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use draw::{content_bounds, fill_rounded_rect, label_panel_rect, Point, HANDLE_RADIUS};
+use draw::{
+    angle_between, content_bounds, draw_arc, draw_handle, draw_text_panel, fill_rounded_rect,
+    label_panel_rect, stroke_line, text_panel_rect, ContentBounds, Point, HANDLE_RADIUS,
+};
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -23,7 +27,7 @@ use winit::window::{Window, WindowId};
 use crate::win32_layered::{
     configure_overlay, ensure_topmost, hwnd_from_window, is_minimized, minimize_window,
     present_pixmap, restore_window, set_click_through, show_context_menu, MENU_CLOSE,
-    MENU_MINIMIZE,
+    MENU_MINIMIZE, MENU_POINT,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -35,10 +39,16 @@ const LOCK_PANEL_SIZE: f32 = 15.5;
 const LOCK_PANEL_RADIUS: f32 = 3.5;
 const LOCK_DISTANCE: f32 = 34.0;
 const EPSILON: f32 = 0.0001;
+const HELPER_HANDLE_INDEX: usize = 3;
+const HELPER_DISTANCE: f32 = 92.0;
+const HELPER_ARC_RADIUS_A: f32 = 34.0;
+const HELPER_ARC_RADIUS_B: f32 = 54.0;
+const HELPER_LABEL_OFFSET: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
     points: [Point; 3],
+    helper_point: Option<Point>,
     angle_locked: bool,
     locked_signed_angle: f32,
     window_x: i32,
@@ -62,32 +72,62 @@ fn settings_path() -> PathBuf {
     PathBuf::from("ProtractorPlus.settings.txt")
 }
 
+fn parse_next<T: FromStr>(values: &mut std::str::SplitWhitespace<'_>) -> Option<T> {
+    values.next()?.parse().ok()
+}
+
 fn load_state() -> Option<SavedState> {
     let text = fs::read_to_string(settings_path()).ok()?;
     let mut values = text.split_whitespace();
-    let version: u32 = values.next()?.parse().ok()?;
-    if version != 1 {
-        return None;
-    }
+    let version: u32 = parse_next(&mut values)?;
 
-    let mut number = || values.next()?.parse::<f32>().ok();
     let points = [
-        Point { x: number()?, y: number()? },
-        Point { x: number()?, y: number()? },
-        Point { x: number()?, y: number()? },
+        Point {
+            x: parse_next(&mut values)?,
+            y: parse_next(&mut values)?,
+        },
+        Point {
+            x: parse_next(&mut values)?,
+            y: parse_next(&mut values)?,
+        },
+        Point {
+            x: parse_next(&mut values)?,
+            y: parse_next(&mut values)?,
+        },
     ];
-    let angle_locked = values.next()?.parse::<u8>().ok()? != 0;
-    let locked_signed_angle = values.next()?.parse::<f32>().ok()?;
-    let window_x = values.next()?.parse::<i32>().ok()?;
-    let window_y = values.next()?.parse::<i32>().ok()?;
 
-    Some(SavedState {
-        points,
-        angle_locked,
-        locked_signed_angle,
-        window_x,
-        window_y,
-    })
+    match version {
+        1 => Some(SavedState {
+            points,
+            helper_point: None,
+            angle_locked: parse_next::<u8>(&mut values)? != 0,
+            locked_signed_angle: parse_next(&mut values)?,
+            window_x: parse_next(&mut values)?,
+            window_y: parse_next(&mut values)?,
+        }),
+        2 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let helper_point = if helper_enabled {
+                Some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                })
+            } else {
+                None
+            };
+            Some(SavedState {
+                points,
+                helper_point,
+                angle_locked: parse_next::<u8>(&mut values)? != 0,
+                locked_signed_angle: parse_next(&mut values)?,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn clamp_line_length(vertex: Point, end: Point) -> Point {
@@ -161,8 +201,6 @@ fn lock_center(points: [Point; 3]) -> Point {
     let vertex = points[1];
     let (bx, by) = angle_bisector_direction(points).unwrap_or((0.0, 1.0));
 
-    // Place the lock on the side opposite the bisector, while slightly biasing it
-    // upward so it naturally stays above the blue vertex when the angle rotates.
     let mut dx = -bx;
     let mut dy = -by - 0.55;
     let len = (dx * dx + dy * dy).sqrt().max(EPSILON);
@@ -261,22 +299,20 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
     if let Some(body) = body {
         let mut paint = Paint::default();
         paint.set_color(icon_color);
-        paint.anti_alias = true;
         pixmap.fill_rect(body, &paint, Transform::identity(), None);
     }
 
-    // Дужка замка. У відкритому стані права ніжка трохи відсунута.
     let right_x = if locked { center.x + 2.5 } else { center.x + 4.0 };
     let mut builder = PathBuilder::new();
     builder.move_to(center.x - 2.5, center.y - 0.5);
-    builder.line_to(center.x - 2.5, center.y - 2.5);
+    builder.line_to(center.x - 2.5, center.y - 3.0);
     builder.cubic_to(
         center.x - 2.5,
-        center.y - 5.5,
+        center.y - 6.8,
         right_x,
-        center.y - 5.5,
+        center.y - 6.8,
         right_x,
-        center.y - 2.5,
+        center.y - 3.0,
     );
     if locked {
         builder.line_to(right_x, center.y - 0.5);
@@ -284,9 +320,8 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
     if let Some(path) = builder.finish() {
         let mut paint = Paint::default();
         paint.set_color(icon_color);
-        paint.anti_alias = true;
         let stroke = Stroke {
-            width: 1.1,
+            width: 1.5,
             ..Stroke::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
@@ -302,14 +337,142 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
             x: center.x,
             y: center.y + 3.0,
         },
-        0.8,
+        1.0,
         Color::from_rgba8(255, 255, 255, 245),
+    );
+}
+
+fn draw_dashed_helper_line(pixmap: &mut Pixmap, vertex: Point, helper: Point) {
+    let distance = vector_length(vertex, helper);
+    if distance < EPSILON {
+        return;
+    }
+    let angle = vector_angle(vertex, helper);
+    let dash = 7.0;
+    let gap = 5.0;
+    let mut pos = HANDLE_RADIUS + 3.0;
+    let end_limit = (distance - HANDLE_RADIUS - 2.0).max(pos);
+    let color = Color::from_rgba8(34, 120, 62, 210);
+    while pos < end_limit {
+        let next = (pos + dash).min(end_limit);
+        stroke_segment(
+            pixmap,
+            point_from_polar(vertex, angle, pos),
+            point_from_polar(vertex, angle, next),
+            1.2,
+            color,
+        );
+        pos += dash + gap;
+    }
+}
+
+fn helper_overlay_bounds(points: [Point; 3], helper: Point) -> ContentBounds {
+    let vertex = points[1];
+    let mut min_x = helper.x.min(vertex.x) - HANDLE_RADIUS;
+    let mut min_y = helper.y.min(vertex.y) - HANDLE_RADIUS;
+    let mut max_x = helper.x.max(vertex.x) + HANDLE_RADIUS;
+    let mut max_y = helper.y.max(vertex.y) + HANDLE_RADIUS;
+
+    let angle_a = vector_angle(vertex, points[0]);
+    let angle_h = vector_angle(vertex, helper);
+    let angle_b = vector_angle(vertex, points[2]);
+    let delta1 = normalize_signed_angle(angle_h - angle_a);
+    let delta2 = normalize_signed_angle(angle_b - angle_h);
+    let mid1 = angle_a + delta1 * 0.5;
+    let mid2 = angle_h + delta2 * 0.5;
+
+    let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
+    let text2 = format!("{}°", angle_between(helper, vertex, points[2]).round() as i32);
+
+    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS_A + HELPER_LABEL_OFFSET);
+    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS_B + HELPER_LABEL_OFFSET);
+    let p1 = text_panel_rect(&text1, c1.x, c1.y);
+    let p2 = text_panel_rect(&text2, c2.x, c2.y);
+
+    for panel in [p1, p2] {
+        min_x = min_x.min(panel.x);
+        min_y = min_y.min(panel.y);
+        max_x = max_x.max(panel.x + panel.width);
+        max_y = max_y.max(panel.y + panel.height);
+    }
+
+    ContentBounds {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
+}
+
+fn merge_bounds(a: ContentBounds, b: ContentBounds) -> ContentBounds {
+    ContentBounds {
+        min_x: a.min_x.min(b.min_x),
+        min_y: a.min_y.min(b.min_y),
+        max_x: a.max_x.max(b.max_x),
+        max_y: a.max_y.max(b.max_y),
+    }
+}
+
+fn draw_helper_overlay(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
+    let vertex = points[1];
+    draw_dashed_helper_line(pixmap, vertex, helper);
+    draw_handle(pixmap, helper, Color::from_rgba8(62, 196, 92, 240));
+
+    let angle_a = vector_angle(vertex, points[0]);
+    let angle_h = vector_angle(vertex, helper);
+    let angle_b = vector_angle(vertex, points[2]);
+    let delta1 = normalize_signed_angle(angle_h - angle_a);
+    let delta2 = normalize_signed_angle(angle_b - angle_h);
+    let mid1 = angle_a + delta1 * 0.5;
+    let mid2 = angle_h + delta2 * 0.5;
+
+    let arc_color = Color::from_rgba8(28, 92, 44, 220);
+    draw_arc(
+        pixmap,
+        vertex,
+        HELPER_ARC_RADIUS_A,
+        angle_a,
+        angle_h,
+        1.4,
+        arc_color,
+    );
+    draw_arc(
+        pixmap,
+        vertex,
+        HELPER_ARC_RADIUS_B,
+        angle_h,
+        angle_b,
+        1.4,
+        arc_color,
+    );
+
+    let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
+    let text2 = format!("{}°", angle_between(helper, vertex, points[2]).round() as i32);
+    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS_A + HELPER_LABEL_OFFSET);
+    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS_B + HELPER_LABEL_OFFSET);
+
+    draw_text_panel(
+        pixmap,
+        &text1,
+        c1.x,
+        c1.y,
+        Color::from_rgba8(255, 255, 255, 148),
+        Color::from_rgba8(18, 18, 18, 248),
+    );
+    draw_text_panel(
+        pixmap,
+        &text2,
+        c2.x,
+        c2.y,
+        Color::from_rgba8(255, 255, 255, 148),
+        Color::from_rgba8(18, 18, 18, 248),
     );
 }
 
 struct App {
     window: Option<Arc<Window>>,
     points: [Point; 3],
+    helper_point: Option<Point>,
     active_handle: Option<usize>,
     cursor_pos: Option<Point>,
     was_minimized: bool,
@@ -325,6 +488,7 @@ impl App {
         Self {
             window: None,
             points: saved.map(|state| state.points).unwrap_or_else(default_points),
+            helper_point: saved.and_then(|state| state.helper_point),
             active_handle: None,
             cursor_pos: None,
             was_minimized: false,
@@ -344,11 +508,34 @@ impl App {
         )
     }
 
+    fn default_helper_point(&self) -> Point {
+        let vertex = self.points[1];
+        let (bx, by) = angle_bisector_direction(self.points).unwrap_or((0.0, -1.0));
+        clamp_line_length(
+            vertex,
+            Point {
+                x: vertex.x + bx * HELPER_DISTANCE,
+                y: vertex.y + by * HELPER_DISTANCE,
+            },
+        )
+    }
+
     fn toggle_angle_lock(&mut self) {
         self.angle_locked = !self.angle_locked;
         if self.angle_locked {
             self.locked_signed_angle = self.current_signed_angle();
         }
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn toggle_helper_point(&mut self) {
+        self.helper_point = if self.helper_point.is_some() {
+            None
+        } else {
+            Some(self.default_helper_point())
+        };
+        self.fit_window_to_content();
         self.save_state();
         self.request_redraw();
     }
@@ -361,14 +548,19 @@ impl App {
             .map(|position| (position.x, position.y))
             .unwrap_or((0, 0));
         let p = self.points;
+        let helper_enabled = u8::from(self.helper_point.is_some());
+        let helper = self.helper_point.unwrap_or(Point { x: 0.0, y: 0.0 });
         let text = format!(
-            "1\n{} {}\n{} {}\n{} {}\n{}\n{}\n{} {}\n",
+            "2\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
             p[1].y,
             p[2].x,
             p[2].y,
+            helper_enabled,
+            helper.x,
+            helper.y,
             u8::from(self.angle_locked),
             self.locked_signed_angle,
             window_x,
@@ -395,6 +587,9 @@ impl App {
         let height = size.height.max(1);
         let mut pixmap = draw::render_angle_measure(width, height, self.points);
         draw_dashed_bisector(&mut pixmap, self.points);
+        if let Some(helper) = self.helper_point {
+            draw_helper_overlay(&mut pixmap, self.points, helper);
+        }
         draw_lock_icon(&mut pixmap, self.points, self.angle_locked);
 
         let pos = window
@@ -527,8 +722,22 @@ impl ApplicationHandler for App {
                 };
                 if button == MouseButton::Right && state == ElementState::Pressed {
                     let hwnd = hwnd_from_window(window);
-                    if let Some(command) = unsafe { show_context_menu(hwnd) } {
+                    let point_menu = self.cursor_pos.and_then(|pos| {
+                        if self.hit_test(pos.x, pos.y) == Some(1) {
+                            Some(if self.helper_point.is_some() {
+                                "Прибрати точку"
+                            } else {
+                                "Точка"
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(command) = unsafe { show_context_menu(hwnd, point_menu) } {
                         match command {
+                            MENU_POINT => {
+                                self.toggle_helper_point();
+                            }
                             MENU_MINIMIZE => {
                                 self.save_state();
                                 self.was_minimized = true;
@@ -640,6 +849,9 @@ impl App {
                 Point { x: w * 0.50, y: h * 0.55 },
                 Point { x: w * 0.78, y: h * 0.68 },
             ];
+            if self.helper_point.is_some() {
+                self.helper_point = Some(self.default_helper_point());
+            }
             if self.angle_locked {
                 self.locked_signed_angle = self.current_signed_angle();
             }
@@ -651,7 +863,10 @@ impl App {
         let Some(window) = &self.window else {
             return;
         };
-        let bounds = content_bounds(self.points);
+        let mut bounds = content_bounds(self.points);
+        if let Some(helper) = self.helper_point {
+            bounds = merge_bounds(bounds, helper_overlay_bounds(self.points, helper));
+        }
         let lock = lock_center(self.points);
         let min_x = bounds.min_x.min(lock.x - LOCK_PANEL_SIZE * 0.5);
         let min_y = bounds.min_y.min(lock.y - LOCK_PANEL_SIZE * 0.5);
@@ -669,6 +884,10 @@ impl App {
                 point.x += shift_x;
                 point.y += shift_y;
             }
+            if let Some(helper) = &mut self.helper_point {
+                helper.x += shift_x;
+                helper.y += shift_y;
+            }
             if let Ok(outer) = window.outer_position() {
                 window.set_outer_position(PhysicalPosition::new(
                     outer.x - shift_x.round() as i32,
@@ -677,7 +896,10 @@ impl App {
             }
         }
 
-        let bounds = content_bounds(self.points);
+        let mut bounds = content_bounds(self.points);
+        if let Some(helper) = self.helper_point {
+            bounds = merge_bounds(bounds, helper_overlay_bounds(self.points, helper));
+        }
         let lock = lock_center(self.points);
         let new_w = (bounds.max_x.max(lock.x + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
             .ceil()
@@ -704,6 +926,7 @@ impl App {
                 self.points[2].x - old_vertex.x,
                 self.points[2].y - old_vertex.y,
             );
+            let helper_off = self.helper_point.map(|helper| (helper.x - old_vertex.x, helper.y - old_vertex.y));
             self.points[1] = target;
             self.points[0] = clamp_line_length(
                 target,
@@ -719,10 +942,27 @@ impl App {
                     y: target.y + b_off.1,
                 },
             );
+            if let Some((hx, hy)) = helper_off {
+                self.helper_point = Some(clamp_line_length(
+                    target,
+                    Point {
+                        x: target.x + hx,
+                        y: target.y + hy,
+                    },
+                ));
+            }
             return;
         }
 
         let vertex = self.points[1];
+        if index == HELPER_HANDLE_INDEX {
+            let moved = clamp_line_length(vertex, target);
+            if vector_length(vertex, moved) >= EPSILON {
+                self.helper_point = Some(moved);
+            }
+            return;
+        }
+
         let moved = clamp_line_length(vertex, target);
         let moved_radius = vector_length(vertex, moved);
         if moved_radius < EPSILON {
@@ -758,6 +998,14 @@ impl App {
 
     fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
         let hit_radius = HANDLE_RADIUS + 6.0;
+        if let Some(helper) = self.helper_point {
+            let dx = helper.x - x;
+            let dy = helper.y - y;
+            if dx * dx + dy * dy <= hit_radius * hit_radius {
+                return Some(HELPER_HANDLE_INDEX);
+            }
+        }
+
         self.points
             .iter()
             .enumerate()

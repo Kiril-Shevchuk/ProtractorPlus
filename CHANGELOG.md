@@ -1,29 +1,31 @@
 # Changelog
 
+## 1.4.0
+
+- додано пункт `Точка` у контекстне меню синьої вершини;
+- повторне натискання через меню прибирає допоміжну точку;
+- додано рухому зелену точку;
+- від синьої вершини до зеленої точки проведено пунктирний допоміжний промінь;
+- додано дві дуги від зеленого напряму до червоних променів;
+- над дугами відображаються окремі блоки зі значеннями двох кутів;
+- положення зеленої точки зберігається між запусками;
+- під час переміщення синьої вершини зелена точка переноситься разом з усією геометрією.
+
 ## 1.3.1
 
-- rendered the Comfortaa degree label internally at 4x resolution;
-- downsampled glyph coverage for smoother edges at the final display size;
-- corrected alpha compositing so anti-aliased text blends cleanly with the semi-transparent panel;
-- optimized the loaded font outlines for the supersampled raster size.
+- текст Comfortaa рендериться у 4-кратній внутрішній роздільній здатності;
+- додано згладжене зменшення символів;
+- виправлено альфа-змішування тексту з напівпрозорим блоком.
 
 ## 1.3.0
 
-- embedded the Comfortaa variable font for the degree label;
-- increased the degree-label rasterization size for improved readability;
-- reduced the lock panel and lock icon by 50%;
-- added 1-degree mouse-wheel adjustment while hovering over the degree panel;
-- preserved the angle bisector and equal ray lengths during wheel adjustment.
+- вбудовано Comfortaa;
+- замок зменшено вдвічі;
+- додано коригування основного кута колесиком із кроком 1°.
 
 ## 1.2.0
 
-- centered the degree text horizontally and vertically;
-- made the degree panel semi-transparent with rounded corners;
-- made the lock panel semi-transparent with rounded corners;
-- attached the lock position to the ray opposite the angle bisector;
-- synchronized the lengths of both rays;
-- upgraded GitHub Actions to Node.js 24-compatible versions.
-
-## 1.1.2
-
-- fixed Windows API type inference for `PostMessageW`.
+- центровано текст градусів;
+- додано напівпрозорі заокруглені блоки;
+- замок прив'язано до протилежного напряму бісектриси;
+- синхронізовано довжини червоних променів.
