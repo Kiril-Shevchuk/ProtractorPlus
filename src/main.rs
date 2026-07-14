@@ -52,13 +52,17 @@ const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
 const PLUS_HIT_RADIUS: f32 = 14.0;
-const NORTH_ANGLE: f32 = -PI * 0.5;
+const NORTH_DEFAULT_ANGLE: f32 = -PI * 0.5;
 const NORTH_ARROW_LENGTH: f32 = 84.0;
 const NORTH_ARROW_HEAD: f32 = 9.0;
 const NORTH_ARC_MIN_RADIUS: f32 = 38.0;
 const NORTH_ARC_MAX_RADIUS: f32 = 72.0;
 const NORTH_LABEL_OFFSET: f32 = 20.0;
 const NORTH_TEXT_SIZE: f32 = 16.0;
+const NORTH_HANDLE_INDEX: usize = 4;
+const NORTH_HANDLE_HIT_RADIUS: f32 = 15.0;
+const NORTH_LOCK_ALONG: f32 = 50.0;
+const NORTH_LOCK_SIDE: f32 = 17.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -75,6 +79,8 @@ struct SavedState {
     distance_visible: bool,
     meters_per_pixel: f32,
     north_visible: bool,
+    north_angle: f32,
+    north_locked: bool,
     window_x: i32,
     window_y: i32,
 }
@@ -135,6 +141,8 @@ fn load_state() -> Option<SavedState> {
             distance_visible: false,
             meters_per_pixel: 0.0,
             north_visible: false,
+            north_angle: NORTH_DEFAULT_ANGLE,
+            north_locked: false,
             window_x: parse_next(&mut values)?,
             window_y: parse_next(&mut values)?,
         }),
@@ -159,6 +167,8 @@ fn load_state() -> Option<SavedState> {
                 distance_visible: false,
                 meters_per_pixel: 0.0,
                 north_visible: false,
+                north_angle: NORTH_DEFAULT_ANGLE,
+                north_locked: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -184,6 +194,8 @@ fn load_state() -> Option<SavedState> {
                 distance_visible: false,
                 meters_per_pixel: 0.0,
                 north_visible: false,
+                north_angle: NORTH_DEFAULT_ANGLE,
+                north_locked: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -209,6 +221,8 @@ fn load_state() -> Option<SavedState> {
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: false,
+                north_angle: NORTH_DEFAULT_ANGLE,
+                north_locked: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -241,6 +255,8 @@ fn load_state() -> Option<SavedState> {
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: false,
+                north_angle: NORTH_DEFAULT_ANGLE,
+                north_locked: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -273,6 +289,42 @@ fn load_state() -> Option<SavedState> {
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: parse_next::<u8>(&mut values)? != 0,
+                north_angle: NORTH_DEFAULT_ANGLE,
+                north_locked: false,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        7 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let angle_locked = parse_next::<u8>(&mut values)? != 0;
+            let locked_signed_angle = parse_next(&mut values)?;
+            let red_lock_code: u8 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                }),
+                angle_locked,
+                locked_signed_angle,
+                red_locked_index: match red_lock_code {
+                    1 => Some(0),
+                    2 => Some(2),
+                    _ => None,
+                },
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
+                north_visible: parse_next::<u8>(&mut values)? != 0,
+                north_angle: parse_next(&mut values)?,
+                north_locked: parse_next::<u8>(&mut values)? != 0,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -536,7 +588,7 @@ fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3], inverted: bool)
 }
 
 
-fn north_arc_geometry(points: [Point; 3]) -> Option<(f32, f32, f32, f32)> {
+fn north_arc_geometry(points: [Point; 3], north_angle: f32) -> Option<(f32, f32, f32, f32)> {
     let vertex = points[1];
     let (bx, by) = angle_bisector_direction(points)?;
     let bisector_angle = by.atan2(bx);
@@ -544,10 +596,9 @@ fn north_arc_geometry(points: [Point; 3]) -> Option<(f32, f32, f32, f32)> {
         .min(vector_length(vertex, points[2]));
     let radius = (red_length * 0.32).clamp(NORTH_ARC_MIN_RADIUS, NORTH_ARC_MAX_RADIUS);
 
-    // Magnetic-style bearing: North is 0°, then values grow clockwise
-    // through East 90°, South 180°, West 270° and up to 359°.
-    let sweep = normalize_bearing_angle(bisector_angle - NORTH_ANGLE);
-    let mut mid_angle = NORTH_ANGLE + sweep * 0.5;
+    // Full clockwise bearing from the user-positioned North arrow to the bisector.
+    let sweep = normalize_bearing_angle(bisector_angle - north_angle);
+    let mut mid_angle = north_angle + sweep * 0.5;
     if sweep < 0.12 {
         // Keep the 0° label beside the arrow instead of directly on top of it.
         mid_angle += 0.20;
@@ -598,8 +649,29 @@ fn draw_bearing_arc(
     }
 }
 
-fn north_arrow_tip(vertex: Point) -> Point {
-    point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH)
+fn north_arrow_tip(vertex: Point, north_angle: f32) -> Point {
+    point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH)
+}
+
+fn north_lock_center(vertex: Point, north_angle: f32) -> Point {
+    let shaft = point_from_polar(vertex, north_angle, NORTH_LOCK_ALONG);
+    point_from_polar(shaft, north_angle + PI * 0.5, NORTH_LOCK_SIDE)
+}
+
+fn in_north_lock_button(point: Point, vertex: Point, north_angle: f32) -> bool {
+    let center = north_lock_center(vertex, north_angle);
+    let half = LOCK_PANEL_SIZE * 0.5 + 4.0;
+    point.x >= center.x - half
+        && point.x <= center.x + half
+        && point.y >= center.y - half
+        && point.y <= center.y + half
+}
+
+fn in_north_handle(point: Point, vertex: Point, north_angle: f32) -> bool {
+    let tip = north_arrow_tip(vertex, north_angle);
+    let dx = point.x - tip.x;
+    let dy = point.y - tip.y;
+    dx * dx + dy * dy <= NORTH_HANDLE_HIT_RADIUS * NORTH_HANDLE_HIT_RADIUS
 }
 
 fn draw_centered_text(
@@ -620,29 +692,31 @@ fn draw_north_overlay(
     points: [Point; 3],
     bisector_visible: bool,
     inverted: bool,
+    north_angle: f32,
+    north_locked: bool,
 ) {
     let vertex = points[1];
     let line_color = foreground_line_color(inverted);
-    let arrow_tip = north_arrow_tip(vertex);
-    let arrow_start = point_from_polar(vertex, NORTH_ANGLE, HANDLE_RADIUS + 4.0);
+    let arrow_tip = north_arrow_tip(vertex, north_angle);
+    let arrow_start = point_from_polar(vertex, north_angle, HANDLE_RADIUS + 4.0);
 
     stroke_segment(pixmap, arrow_start, arrow_tip, 1.55, line_color);
 
     // Conventional magnetic-north arrowhead.
     let left = point_from_polar(
         arrow_tip,
-        NORTH_ANGLE + PI - 0.48,
+        north_angle + PI - 0.48,
         NORTH_ARROW_HEAD,
     );
     let right = point_from_polar(
         arrow_tip,
-        NORTH_ANGLE + PI + 0.48,
+        north_angle + PI + 0.48,
         NORTH_ARROW_HEAD,
     );
     stroke_segment(pixmap, arrow_tip, left, 1.55, line_color);
     stroke_segment(pixmap, arrow_tip, right, 1.55, line_color);
 
-    let n_center = point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH + 15.0);
+    let n_center = point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH + 15.0);
     draw_centered_text(
         pixmap,
         "N",
@@ -651,11 +725,26 @@ fn draw_north_overlay(
         line_color,
     );
 
+    let open_color = if inverted {
+        Color::from_rgba8(255, 255, 255, 235)
+    } else {
+        Color::from_rgba8(45, 45, 45, 235)
+    };
+    draw_lock_at(
+        pixmap,
+        north_lock_center(vertex, north_angle),
+        north_locked,
+        Color::from_rgba8(35, 112, 225, 255),
+        open_color,
+    );
+
     if !bisector_visible {
         return;
     }
 
-    let Some((_bisector_angle, sweep, mid_angle, radius)) = north_arc_geometry(points) else {
+    let Some((_bisector_angle, sweep, mid_angle, radius)) =
+        north_arc_geometry(points, north_angle)
+    else {
         return;
     };
     let arc_color = Color::from_rgba8(54, 123, 235, 242);
@@ -663,7 +752,7 @@ fn draw_north_overlay(
         pixmap,
         vertex,
         radius,
-        NORTH_ANGLE,
+        north_angle,
         sweep,
         1.65,
         arc_color,
@@ -681,24 +770,31 @@ fn draw_north_overlay(
     );
 }
 
-fn north_overlay_bounds(points: [Point; 3], bisector_visible: bool) -> ContentBounds {
+fn north_overlay_bounds(
+    points: [Point; 3],
+    bisector_visible: bool,
+    north_angle: f32,
+) -> ContentBounds {
     let vertex = points[1];
-    let arrow_tip = north_arrow_tip(vertex);
-    let n_center = point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH + 15.0);
+    let arrow_tip = north_arrow_tip(vertex, north_angle);
+    let n_center = point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH + 15.0);
+    let lock = north_lock_center(vertex, north_angle);
     let mut bounds = ContentBounds {
-        min_x: vertex.x.min(arrow_tip.x).min(n_center.x) - 18.0,
-        min_y: vertex.y.min(arrow_tip.y).min(n_center.y) - 18.0,
-        max_x: vertex.x.max(arrow_tip.x).max(n_center.x) + 18.0,
-        max_y: vertex.y.max(arrow_tip.y).max(n_center.y) + 18.0,
+        min_x: vertex.x.min(arrow_tip.x).min(n_center.x).min(lock.x) - 18.0,
+        min_y: vertex.y.min(arrow_tip.y).min(n_center.y).min(lock.y) - 18.0,
+        max_x: vertex.x.max(arrow_tip.x).max(n_center.x).max(lock.x) + 18.0,
+        max_y: vertex.y.max(arrow_tip.y).max(n_center.y).max(lock.y) + 18.0,
     };
 
     if bisector_visible {
-        if let Some((_bisector_angle, sweep, mid_angle, radius)) = north_arc_geometry(points) {
+        if let Some((_bisector_angle, sweep, mid_angle, radius)) =
+            north_arc_geometry(points, north_angle)
+        {
             include_bearing_arc_in_bounds(
                 &mut bounds,
                 vertex,
                 radius,
-                NORTH_ANGLE,
+                north_angle,
                 sweep,
             );
             let angle_text = format!("{}°", bearing_degrees(sweep));
@@ -1268,6 +1364,8 @@ struct App {
     distance_visible: bool,
     meters_per_pixel: f32,
     north_visible: bool,
+    north_angle: f32,
+    north_locked: bool,
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
@@ -1308,6 +1406,8 @@ impl App {
                 .map(|state| state.meters_per_pixel)
                 .unwrap_or(0.0),
             north_visible: saved.map(|state| state.north_visible).unwrap_or(false),
+            north_angle: saved.map(|state| state.north_angle).unwrap_or(NORTH_DEFAULT_ANGLE),
+            north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
             distance_editor: None,
             last_distance_click: None,
             last_plus_click: None,
@@ -1364,6 +1464,9 @@ impl App {
 
         let vertex = self.points[1];
         let signed_angle = self.current_signed_angle();
+        let old_centre_angle = normalize_signed_angle(
+            vector_angle(vertex, self.points[0]) + signed_angle * 0.5,
+        );
         let half_angle = signed_angle * 0.5;
         let centre_distance = vector_length(vertex, helper);
         let projection = half_angle.cos().abs();
@@ -1395,6 +1498,9 @@ impl App {
             centre_angle + signed_angle * 0.5,
             radius,
         );
+        self.rotate_north_if_unlocked(normalize_signed_angle(
+            centre_angle - old_centre_angle,
+        ));
 
         if self.angle_locked {
             self.locked_signed_angle = signed_angle;
@@ -1431,6 +1537,21 @@ impl App {
         }
         self.save_state();
         self.request_redraw();
+    }
+
+    fn toggle_north_lock(&mut self) {
+        if !self.north_visible {
+            return;
+        }
+        self.north_locked = !self.north_locked;
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn rotate_north_if_unlocked(&mut self, delta_radians: f32) {
+        if self.north_visible && !self.north_locked {
+            self.north_angle = normalize_signed_angle(self.north_angle + delta_radians);
+        }
     }
 
     fn toggle_helper_point(&mut self) {
@@ -1520,7 +1641,7 @@ impl App {
             _ => 0u8,
         };
         let text = format!(
-            "6\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
+            "7\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
@@ -1541,6 +1662,8 @@ impl App {
             u8::from(self.distance_visible),
             self.meters_per_pixel,
             u8::from(self.north_visible),
+            self.north_angle,
+            u8::from(self.north_locked),
             window_x,
             window_y,
         );
@@ -1582,6 +1705,8 @@ impl App {
                 self.points,
                 self.bisector_visible,
                 self.inverted,
+                self.north_angle,
+                self.north_locked,
             );
         }
         if let Some(helper) = self.helper_point {
@@ -1835,6 +1960,7 @@ impl App {
             let radius = vector_length(vertex, self.points[index]);
             self.points[index] = point_from_polar(vertex, angle, radius);
         }
+        self.rotate_north_if_unlocked(delta);
     }
 
 
@@ -1854,6 +1980,7 @@ impl App {
             let radius = vector_length(pivot, self.points[moving_index]);
             self.points[moving_index] = point_from_polar(pivot, angle, radius);
         }
+        self.rotate_north_if_unlocked(delta);
     }
 
     fn wheel_units(delta: MouseScrollDelta) -> f32 {
@@ -2007,6 +2134,21 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
+                            if self.north_visible {
+                                let vertex = self.points[1];
+                                if in_north_lock_button(pos, vertex, self.north_angle) {
+                                    self.toggle_north_lock();
+                                    return;
+                                }
+                                if in_north_handle(pos, vertex, self.north_angle) {
+                                    self.active_handle = if self.north_locked {
+                                        None
+                                    } else {
+                                        Some(NORTH_HANDLE_INDEX)
+                                    };
+                                    return;
+                                }
+                            }
                             if let Some(helper) = self.helper_point {
                                 if in_helper_handle(pos, helper) {
                                     let now = Instant::now();
@@ -2245,7 +2387,7 @@ impl App {
         if self.north_visible {
             bounds = merge_bounds(
                 bounds,
-                north_overlay_bounds(self.points, self.bisector_visible),
+                north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
             );
         }
         if let Some(helper) = self.helper_point {
@@ -2308,7 +2450,7 @@ impl App {
         if self.north_visible {
             bounds = merge_bounds(
                 bounds,
-                north_overlay_bounds(self.points, self.bisector_visible),
+                north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
             );
         }
         if let Some(helper) = self.helper_point {
@@ -2356,6 +2498,16 @@ impl App {
     }
 
     fn move_handle(&mut self, index: usize, target: Point) {
+        if index == NORTH_HANDLE_INDEX {
+            if self.north_visible && !self.north_locked {
+                let vertex = self.points[1];
+                if vector_length(vertex, target) >= HANDLE_RADIUS + 8.0 {
+                    self.north_angle = normalize_signed_angle(vector_angle(vertex, target));
+                }
+            }
+            return;
+        }
+
         if index == 1 {
             if let Some(red_index) = self.red_locked_index {
                 if !self.angle_locked {
@@ -2377,6 +2529,7 @@ impl App {
                         let other_radius = vector_length(pivot, self.points[other_index]);
                         self.points[other_index] =
                             point_from_polar(pivot, other_angle, other_radius);
+                        self.rotate_north_if_unlocked(delta);
                     }
                     return;
                 }
@@ -2458,6 +2611,7 @@ impl App {
         }
 
         if index == 0 {
+            let old_angle = vector_angle(vertex, self.points[0]);
             let moved_angle = vector_angle(vertex, moved);
             self.points[0] = moved;
             self.points[2] = point_from_polar(
@@ -2465,7 +2619,9 @@ impl App {
                 moved_angle + self.locked_signed_angle,
                 moved_radius,
             );
+            self.rotate_north_if_unlocked(normalize_signed_angle(moved_angle - old_angle));
         } else {
+            let old_angle = vector_angle(vertex, self.points[2]);
             let moved_angle = vector_angle(vertex, moved);
             self.points[2] = moved;
             self.points[0] = point_from_polar(
@@ -2473,10 +2629,18 @@ impl App {
                 moved_angle - self.locked_signed_angle,
                 moved_radius,
             );
+            self.rotate_north_if_unlocked(normalize_signed_angle(moved_angle - old_angle));
         }
     }
 
     fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
+        if self.north_visible && !self.north_locked {
+            let point = Point { x, y };
+            if in_north_handle(point, self.points[1], self.north_angle) {
+                return Some(NORTH_HANDLE_INDEX);
+            }
+        }
+
         if let Some(helper) = self.helper_point {
             let dx = helper.x - x;
             let dy = helper.y - y;
