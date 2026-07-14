@@ -10,9 +10,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetWindowLongW, IsIconic, PostMessageW,
     SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, TrackPopupMenu,
-    UpdateLayeredWindow, GWL_EXSTYLE, HMENU, HWND_TOPMOST, LWA_ALPHA, MF_STRING,
+    UpdateLayeredWindow, GWL_EXSTYLE, HMENU, HWND_TOPMOST, MF_STRING,
     SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, TPM_LEFTALIGN,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WINDOW_EX_STYLE, WM_NULL, WS_EX_LAYERED,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_NULL, WS_EX_LAYERED,
     WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use winit::window::Window;
@@ -22,7 +22,7 @@ pub const MENU_CLOSE: u32 = 2;
 
 pub fn hwnd_from_window(window: &Window) -> HWND {
     match window.window_handle().expect("window handle").as_raw() {
-        RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as isize),
+        RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as *mut core::ffi::c_void),
         _ => panic!("ProtractorPlus supports Windows only"),
     }
 }
@@ -76,7 +76,7 @@ pub unsafe fn show_context_menu(hwnd: HWND) -> Option<u32> {
     let _ = AppendMenuW(menu, MF_STRING, MENU_MINIMIZE as usize, PCWSTR(minimize.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE as usize, PCWSTR(close.as_ptr()));
     let mut point = POINT::default();
-    if !windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).as_bool() {
+    if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).is_err() {
         let _ = DestroyMenu(menu);
         return None;
     }
@@ -100,11 +100,11 @@ pub unsafe fn present_pixmap(hwnd: HWND, pixmap: &Pixmap, x: i32, y: i32) {
     let height = pixmap.height() as i32;
     if width <= 0 || height <= 0 { return; }
 
-    let screen_dc = GetDC(HWND(0));
-    if screen_dc.0 == 0 { return; }
+    let screen_dc = GetDC(HWND::default());
+    if screen_dc.0.is_null() { return; }
     let memory_dc = CreateCompatibleDC(screen_dc);
-    if memory_dc.0 == 0 {
-        let _ = ReleaseDC(HWND(0), screen_dc);
+    if memory_dc.0.is_null() {
+        let _ = ReleaseDC(HWND::default(), screen_dc);
         return;
     }
 
@@ -127,9 +127,9 @@ pub unsafe fn present_pixmap(hwnd: HWND, pixmap: &Pixmap, x: i32, y: i32) {
         None,
         0,
     ).unwrap_or_default();
-    if bitmap.0 == 0 || bits.is_null() {
+    if bitmap.0.is_null() || bits.is_null() {
         let _ = DeleteDC(memory_dc);
-        let _ = ReleaseDC(HWND(0), screen_dc);
+        let _ = ReleaseDC(HWND::default(), screen_dc);
         return;
     }
 
@@ -167,5 +167,5 @@ pub unsafe fn present_pixmap(hwnd: HWND, pixmap: &Pixmap, x: i32, y: i32) {
     let _ = SelectObject(memory_dc, old);
     let _ = DeleteObject(HGDIOBJ(bitmap.0));
     let _ = DeleteDC(memory_dc);
-    let _ = ReleaseDC(HWND(0), screen_dc);
+    let _ = ReleaseDC(HWND::default(), screen_dc);
 }

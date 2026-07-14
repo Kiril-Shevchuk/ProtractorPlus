@@ -569,8 +569,6 @@ impl App {
         let lock = lock_center(self.points[1]);
         let min_x = bounds.min_x.min(lock.x - LOCK_SIZE);
         let min_y = bounds.min_y.min(lock.y - LOCK_SIZE);
-        let max_x = bounds.max_x.max(lock.x + LOCK_SIZE);
-        let max_y = bounds.max_y.max(lock.y + LOCK_SIZE);
 
         let mut shift_x = 0.0f32;
         let mut shift_y = 0.0f32;

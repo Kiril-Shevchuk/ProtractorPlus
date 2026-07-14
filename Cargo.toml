@@ -1,6 +1,6 @@
 [package]
 name = "protractor_plus"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Always-on-top transparent angle-measuring overlay for Windows"
 license = "GPL-3.0-only"
@@ -10,11 +10,11 @@ name = "ProtractorPlus"
 path = "src/main.rs"
 
 [dependencies]
-winit = "0.30"
-tiny-skia = "0.11"
-fontdue = "0.9"
-raw-window-handle = "0.6"
-windows = { version = "0.58", features = [
+winit = "=0.30.13"
+tiny-skia = "=0.11.4"
+fontdue = "=0.9.3"
+raw-window-handle = "=0.6.2"
+windows = { version = "=0.58.0", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",

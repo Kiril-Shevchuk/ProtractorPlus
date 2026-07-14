@@ -57,6 +57,7 @@ pub fn draw_text(
 ) {
     let font = ui_font();
     let rgba = color.to_color_u8();
+    let pixmap_width = pixmap.width() as usize;
     for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, size);
         let gx = x.round() as i32 + metrics.xmin;
@@ -77,7 +78,7 @@ pub fn draw_text(
                     ((rgba.blue() as u16 * a as u16) / 255) as u8,
                     a,
                 ).unwrap();
-                pixmap.pixels_mut()[py as usize * pixmap.width() as usize + px as usize] = src;
+                pixmap.pixels_mut()[py as usize * pixmap_width + px as usize] = src;
             }
         }
         x += metrics.advance_width;
