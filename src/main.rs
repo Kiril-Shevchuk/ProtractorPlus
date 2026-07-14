@@ -16,7 +16,7 @@ use draw::{
     angle_between, content_bounds, draw_arc, draw_handle, draw_text_panel, fill_rounded_rect,
     label_panel_rect, stroke_line, text_panel_rect, ContentBounds, Point, HANDLE_RADIUS,
 };
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -41,9 +41,8 @@ const LOCK_DISTANCE: f32 = 34.0;
 const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
-const HELPER_ARC_RADIUS_A: f32 = 34.0;
-const HELPER_ARC_RADIUS_B: f32 = 54.0;
-const HELPER_LABEL_OFFSET: f32 = 20.0;
+const HELPER_ARC_RADIUS: f32 = 44.0;
+const HELPER_LABEL_OFFSET: f32 = 22.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -342,27 +341,51 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
     );
 }
 
-fn draw_dashed_helper_line(pixmap: &mut Pixmap, vertex: Point, helper: Point) {
+fn draw_dash_dot_helper_line(pixmap: &mut Pixmap, vertex: Point, helper: Point) {
     let distance = vector_length(vertex, helper);
     if distance < EPSILON {
         return;
     }
+
     let angle = vector_angle(vertex, helper);
-    let dash = 7.0;
-    let gap = 5.0;
+    let dash_length = 8.0;
+    let gap = 3.0;
+    let dot_radius = 1.35;
     let mut pos = HANDLE_RADIUS + 3.0;
     let end_limit = (distance - HANDLE_RADIUS - 2.0).max(pos);
-    let color = Color::from_rgba8(34, 120, 62, 210);
+    let color = Color::from_rgba8(18, 18, 18, 225);
+
+    // Repeating dash-dot pattern: _ . _ . _ .
     while pos < end_limit {
-        let next = (pos + dash).min(end_limit);
+        let dash_end = (pos + dash_length).min(end_limit);
         stroke_segment(
             pixmap,
             point_from_polar(vertex, angle, pos),
-            point_from_polar(vertex, angle, next),
-            1.2,
+            point_from_polar(vertex, angle, dash_end),
+            1.15,
             color,
         );
-        pos += dash + gap;
+
+        let dot_center_distance = dash_end + gap + dot_radius;
+        if dot_center_distance + dot_radius <= end_limit {
+            let dot_center = point_from_polar(vertex, angle, dot_center_distance);
+            let mut dot = PathBuilder::new();
+            dot.push_circle(dot_center.x, dot_center.y, dot_radius);
+            if let Some(path) = dot.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(color);
+                paint.anti_alias = true;
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        pos = dot_center_distance + dot_radius + gap;
     }
 }
 
@@ -384,8 +407,8 @@ fn helper_overlay_bounds(points: [Point; 3], helper: Point) -> ContentBounds {
     let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
     let text2 = format!("{}°", angle_between(helper, vertex, points[2]).round() as i32);
 
-    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS_A + HELPER_LABEL_OFFSET);
-    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS_B + HELPER_LABEL_OFFSET);
+    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS + HELPER_LABEL_OFFSET);
+    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS + HELPER_LABEL_OFFSET);
     let p1 = text_panel_rect(&text1, c1.x, c1.y);
     let p2 = text_panel_rect(&text2, c2.x, c2.y);
 
@@ -415,7 +438,7 @@ fn merge_bounds(a: ContentBounds, b: ContentBounds) -> ContentBounds {
 
 fn draw_helper_overlay(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
     let vertex = points[1];
-    draw_dashed_helper_line(pixmap, vertex, helper);
+    draw_dash_dot_helper_line(pixmap, vertex, helper);
     draw_handle(pixmap, helper, Color::from_rgba8(62, 196, 92, 240));
 
     let angle_a = vector_angle(vertex, points[0]);
@@ -430,7 +453,7 @@ fn draw_helper_overlay(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
     draw_arc(
         pixmap,
         vertex,
-        HELPER_ARC_RADIUS_A,
+        HELPER_ARC_RADIUS,
         angle_a,
         angle_h,
         1.4,
@@ -439,7 +462,7 @@ fn draw_helper_overlay(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
     draw_arc(
         pixmap,
         vertex,
-        HELPER_ARC_RADIUS_B,
+        HELPER_ARC_RADIUS,
         angle_h,
         angle_b,
         1.4,
@@ -448,8 +471,8 @@ fn draw_helper_overlay(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
 
     let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
     let text2 = format!("{}°", angle_between(helper, vertex, points[2]).round() as i32);
-    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS_A + HELPER_LABEL_OFFSET);
-    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS_B + HELPER_LABEL_OFFSET);
+    let c1 = point_from_polar(vertex, mid1, HELPER_ARC_RADIUS + HELPER_LABEL_OFFSET);
+    let c2 = point_from_polar(vertex, mid2, HELPER_ARC_RADIUS + HELPER_LABEL_OFFSET);
 
     draw_text_panel(
         pixmap,
