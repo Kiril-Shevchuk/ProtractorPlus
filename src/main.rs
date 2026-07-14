@@ -307,6 +307,12 @@ fn in_angle_label(point: Point, points: [Point; 3]) -> bool {
         && point.y <= panel.y + panel.height
 }
 
+fn in_helper_handle(point: Point, helper: Point) -> bool {
+    let dx = point.x - helper.x;
+    let dy = point.y - helper.y;
+    dx * dx + dy * dy <= PLUS_HIT_RADIUS * PLUS_HIT_RADIUS
+}
+
 fn stroke_segment(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: Color) {
     let mut builder = PathBuilder::new();
     builder.move_to(from.x, from.y);
@@ -458,38 +464,39 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverte
     );
 }
 
-fn draw_dash_dot_helper_line(
+fn draw_dash_dot_line(
     pixmap: &mut Pixmap,
-    vertex: Point,
-    helper: Point,
-    inverted: bool,
+    from: Point,
+    to: Point,
+    color: Color,
+    trim_start: f32,
+    trim_end: f32,
 ) {
-    let distance = vector_length(vertex, helper);
-    if distance < EPSILON {
+    let distance = vector_length(from, to);
+    if distance <= trim_start + trim_end + EPSILON {
         return;
     }
 
-    let angle = vector_angle(vertex, helper);
+    let angle = vector_angle(from, to);
     let dash_length = 8.0;
     let gap = 3.0;
     let dot_radius = 1.35;
-    let mut position = HANDLE_RADIUS + 3.0;
-    let end_limit = (distance - PLUS_HIT_RADIUS * 0.6).max(position);
-    let color = foreground_line_color(inverted);
+    let mut position = trim_start;
+    let end_limit = distance - trim_end;
 
     while position < end_limit {
         let dash_end = (position + dash_length).min(end_limit);
         stroke_segment(
             pixmap,
-            point_from_polar(vertex, angle, position),
-            point_from_polar(vertex, angle, dash_end),
+            point_from_polar(from, angle, position),
+            point_from_polar(from, angle, dash_end),
             1.15,
             color,
         );
 
         let dot_center_distance = dash_end + gap + dot_radius;
         if dot_center_distance + dot_radius <= end_limit {
-            let dot_center = point_from_polar(vertex, angle, dot_center_distance);
+            let dot_center = point_from_polar(from, angle, dot_center_distance);
             let mut dot = PathBuilder::new();
             dot.push_circle(dot_center.x, dot_center.y, dot_radius);
             if let Some(path) = dot.finish() {
@@ -510,6 +517,101 @@ fn draw_dash_dot_helper_line(
     }
 }
 
+fn draw_dash_dot_helper_line(
+    pixmap: &mut Pixmap,
+    vertex: Point,
+    helper: Point,
+    inverted: bool,
+) {
+    draw_dash_dot_line(
+        pixmap,
+        vertex,
+        helper,
+        foreground_line_color(inverted),
+        HANDLE_RADIUS + 3.0,
+        PLUS_HIT_RADIUS * 0.6,
+    );
+}
+
+fn cross_2d(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    ax * by - ay * bx
+}
+
+/// Intersects the ray V->helper with the red hypotenuse segment A-B.
+/// The returned scalar uses V + t * (helper - V), so t=1 is the plus itself.
+fn helper_hypotenuse_intersection(points: [Point; 3], helper: Point) -> Option<(Point, f32)> {
+    let vertex = points[1];
+    let ray_x = helper.x - vertex.x;
+    let ray_y = helper.y - vertex.y;
+    if ray_x * ray_x + ray_y * ray_y < EPSILON * EPSILON {
+        return None;
+    }
+
+    let a = points[0];
+    let b = points[2];
+    let seg_x = b.x - a.x;
+    let seg_y = b.y - a.y;
+    let denominator = cross_2d(ray_x, ray_y, seg_x, seg_y);
+    if denominator.abs() < EPSILON {
+        return None;
+    }
+
+    let av_x = a.x - vertex.x;
+    let av_y = a.y - vertex.y;
+    let t = cross_2d(av_x, av_y, seg_x, seg_y) / denominator;
+    let u = cross_2d(av_x, av_y, ray_x, ray_y) / denominator;
+    if t < 0.0 || !(-EPSILON..=1.0 + EPSILON).contains(&u) {
+        return None;
+    }
+
+    Some((
+        Point {
+            x: vertex.x + ray_x * t,
+            y: vertex.y + ray_y * t,
+        },
+        t,
+    ))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OutsideAngleInfo {
+    mid_angle: f32,
+    delta_radians: f32,
+}
+
+/// Returns the angular overrun when the plus ray leaves the smaller red sector.
+fn helper_outside_angle(points: [Point; 3], helper: Point) -> Option<OutsideAngleInfo> {
+    let vertex = points[1];
+    let angle_a = vector_angle(vertex, points[0]);
+    let angle_b = vector_angle(vertex, points[2]);
+    let angle_h = vector_angle(vertex, helper);
+    let main = normalize_signed_angle(angle_b - angle_a);
+    let sweep = main.abs();
+    if sweep < EPSILON {
+        return None;
+    }
+
+    let orientation = if main >= 0.0 { 1.0 } else { -1.0 };
+    let directed = normalize_signed_angle(orientation * normalize_signed_angle(angle_h - angle_a));
+    if directed >= -EPSILON && directed <= sweep + EPSILON {
+        return None;
+    }
+
+    let delta_a = normalize_signed_angle(angle_h - angle_a).abs();
+    let delta_b = normalize_signed_angle(angle_h - angle_b).abs();
+    let (boundary_angle, delta_radians) = if delta_a <= delta_b {
+        (angle_a, delta_a)
+    } else {
+        (angle_b, delta_b)
+    };
+    let helper_delta = normalize_signed_angle(angle_h - boundary_angle);
+
+    Some(OutsideAngleInfo {
+        mid_angle: boundary_angle + helper_delta * 0.5,
+        delta_radians,
+    })
+}
+
 fn helper_arc_geometry(points: [Point; 3], helper: Point) -> (f32, f32, f32, f32, f32, f32) {
     let vertex = points[1];
     let angle_a = vector_angle(vertex, points[0]);
@@ -520,11 +622,35 @@ fn helper_arc_geometry(points: [Point; 3], helper: Point) -> (f32, f32, f32, f32
     let mid_ah = angle_a + delta_ah * 0.5;
     let mid_hb = angle_h + delta_hb * 0.5;
 
-    let red_length = vector_length(vertex, points[0])
-        .min(vector_length(vertex, points[2]));
-    let maximum = (red_length - HANDLE_RADIUS - 4.0).max(18.0);
-    let radius = (red_length * 0.5).min(maximum).max(18.0);
+    // v1.7: the helper arcs are anchored to the centre of the V->plus line.
+    let helper_length = vector_length(vertex, helper);
+    let radius = (helper_length * 0.5).max(14.0);
     (angle_a, angle_h, angle_b, mid_ah, mid_hb, radius)
+}
+
+fn include_point_in_bounds(bounds: &mut ContentBounds, point: Point, padding: f32) {
+    bounds.min_x = bounds.min_x.min(point.x - padding);
+    bounds.min_y = bounds.min_y.min(point.y - padding);
+    bounds.max_x = bounds.max_x.max(point.x + padding);
+    bounds.max_y = bounds.max_y.max(point.y + padding);
+}
+
+fn include_arc_in_bounds(
+    bounds: &mut ContentBounds,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+) {
+    let delta = normalize_signed_angle(end_angle - start_angle);
+    for step in 0..=24 {
+        let t = step as f32 / 24.0;
+        include_point_in_bounds(
+            bounds,
+            point_from_polar(center, start_angle + delta * t, radius),
+            4.0,
+        );
+    }
 }
 
 fn helper_overlay_bounds(
@@ -533,18 +659,33 @@ fn helper_overlay_bounds(
     plus_degrees_visible: bool,
 ) -> ContentBounds {
     let vertex = points[1];
-    let mut min_x = helper.x.min(vertex.x) - PLUS_HIT_RADIUS;
-    let mut min_y = helper.y.min(vertex.y) - PLUS_HIT_RADIUS;
-    let mut max_x = helper.x.max(vertex.x) + PLUS_HIT_RADIUS;
-    let mut max_y = helper.y.max(vertex.y) + PLUS_HIT_RADIUS;
+    let mut bounds = ContentBounds {
+        min_x: helper.x.min(vertex.x) - PLUS_HIT_RADIUS,
+        min_y: helper.y.min(vertex.y) - PLUS_HIT_RADIUS,
+        max_x: helper.x.max(vertex.x) + PLUS_HIT_RADIUS,
+        max_y: helper.y.max(vertex.y) + PLUS_HIT_RADIUS,
+    };
 
-    let (_, _, _, mid1, mid2, radius) = helper_arc_geometry(points, helper);
-    for angle in [mid1, mid2] {
-        let arc_mid = point_from_polar(vertex, angle, radius);
-        min_x = min_x.min(arc_mid.x - 4.0);
-        min_y = min_y.min(arc_mid.y - 4.0);
-        max_x = max_x.max(arc_mid.x + 4.0);
-        max_y = max_y.max(arc_mid.y + 4.0);
+    let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
+        helper_arc_geometry(points, helper);
+    include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
+    include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
+
+    if let Some((intersection, t)) = helper_hypotenuse_intersection(points, helper) {
+        include_point_in_bounds(&mut bounds, intersection, 5.0);
+        if t < 1.0 - EPSILON {
+            let helper_distance = vector_length(vertex, helper);
+            for red in [points[0], points[2]] {
+                let red_angle = vector_angle(vertex, red);
+                let red_distance = vector_length(vertex, red);
+                let extension_distance = helper_distance.max(red_distance + 40.0);
+                include_point_in_bounds(
+                    &mut bounds,
+                    point_from_polar(vertex, red_angle, extension_distance),
+                    4.0,
+                );
+            }
+        }
     }
 
     if plus_degrees_visible {
@@ -556,19 +697,24 @@ fn helper_overlay_bounds(
             text_panel_rect(&text1, center1.x, center1.y),
             text_panel_rect(&text2, center2.x, center2.y),
         ] {
-            min_x = min_x.min(panel.x);
-            min_y = min_y.min(panel.y);
-            max_x = max_x.max(panel.x + panel.width);
-            max_y = max_y.max(panel.y + panel.height);
+            bounds.min_x = bounds.min_x.min(panel.x);
+            bounds.min_y = bounds.min_y.min(panel.y);
+            bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+            bounds.max_y = bounds.max_y.max(panel.y + panel.height);
         }
     }
 
-    ContentBounds {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
+    if let Some(outside) = helper_outside_angle(points, helper) {
+        let delta_text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
+        let delta_center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
+        let panel = text_panel_rect(&delta_text, delta_center.x, delta_center.y);
+        bounds.min_x = bounds.min_x.min(panel.x);
+        bounds.min_y = bounds.min_y.min(panel.y);
+        bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+        bounds.max_y = bounds.max_y.max(panel.y + panel.height);
     }
+
+    bounds
 }
 
 fn merge_bounds(a: ContentBounds, b: ContentBounds) -> ContentBounds {
@@ -577,6 +723,33 @@ fn merge_bounds(a: ContentBounds, b: ContentBounds) -> ContentBounds {
         min_y: a.min_y.min(b.min_y),
         max_x: a.max_x.max(b.max_x),
         max_y: a.max_y.max(b.max_y),
+    }
+}
+
+fn draw_red_ray_extensions(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
+    let vertex = points[1];
+    let helper_distance = vector_length(vertex, helper);
+    let color = Color::from_rgba8(235, 50, 50, 225);
+
+    for red in [points[0], points[2]] {
+        let red_angle = vector_angle(vertex, red);
+        let red_distance = vector_length(vertex, red);
+        let extension_distance = helper_distance.max(red_distance + 40.0);
+        let start_distance = red_distance + HANDLE_RADIUS + 2.0;
+        if extension_distance <= start_distance + EPSILON {
+            continue;
+        }
+        draw_dashed_line(
+            pixmap,
+            point_from_polar(vertex, red_angle, start_distance),
+            point_from_polar(vertex, red_angle, extension_distance),
+            7.0,
+            5.0,
+            1.35,
+            color,
+            0.0,
+            0.0,
+        );
     }
 }
 
@@ -590,49 +763,79 @@ fn draw_helper_overlay(
     let vertex = points[1];
     draw_dash_dot_helper_line(pixmap, vertex, helper, inverted);
 
+    if let Some((intersection, t)) = helper_hypotenuse_intersection(points, helper) {
+        if t > 1.0 + EPSILON {
+            // The plus is before the hypotenuse: continue its sight line in green.
+            draw_dash_dot_line(
+                pixmap,
+                helper,
+                intersection,
+                Color::from_rgba8(48, 205, 88, 235),
+                PLUS_HIT_RADIUS * 0.65,
+                2.0,
+            );
+        } else if t < 1.0 - EPSILON {
+            // The plus has crossed the hypotenuse: extend both red boundary rays.
+            draw_red_ray_extensions(pixmap, points, helper);
+        }
+    }
+
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
-    let arc_color = Color::from_rgba8(48, 205, 88, 230);
-    draw_arc(
-        pixmap,
-        vertex,
-        radius,
-        angle_a,
-        angle_h,
-        1.5,
-        arc_color,
-    );
-    draw_arc(
-        pixmap,
-        vertex,
-        radius,
-        angle_h,
-        angle_b,
-        1.5,
-        arc_color,
-    );
+    let outside = helper_outside_angle(points, helper);
+    let arc_color = if outside.is_some() {
+        Color::from_rgba8(235, 62, 62, 235)
+    } else {
+        Color::from_rgba8(48, 205, 88, 230)
+    };
+    draw_arc(pixmap, vertex, radius, angle_a, angle_h, 1.5, arc_color);
+    draw_arc(pixmap, vertex, radius, angle_h, angle_b, 1.5, arc_color);
 
     if plus_degrees_visible {
         let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
         let text2 = format!("{}°", angle_between(helper, vertex, points[2]).round() as i32);
         let center1 = point_from_polar(vertex, mid1, radius);
         let center2 = point_from_polar(vertex, mid2, radius);
+        let panel_background = if outside.is_some() {
+            Color::from_rgba8(255, 225, 225, 175)
+        } else {
+            Color::from_rgba8(255, 255, 255, 148)
+        };
+        let panel_text = if outside.is_some() {
+            Color::from_rgba8(150, 24, 24, 250)
+        } else {
+            Color::from_rgba8(18, 18, 18, 248)
+        };
 
         draw_text_panel(
             pixmap,
             &text1,
             center1.x,
             center1.y,
-            Color::from_rgba8(255, 255, 255, 148),
-            Color::from_rgba8(18, 18, 18, 248),
+            panel_background,
+            panel_text,
         );
         draw_text_panel(
             pixmap,
             &text2,
             center2.x,
             center2.y,
-            Color::from_rgba8(255, 255, 255, 148),
-            Color::from_rgba8(18, 18, 18, 248),
+            panel_background,
+            panel_text,
+        );
+    }
+
+    if let Some(outside) = outside {
+        // The additional panel reports only the angular overrun beyond the sector.
+        let delta_text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
+        let delta_center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
+        draw_text_panel(
+            pixmap,
+            &delta_text,
+            delta_center.x,
+            delta_center.y,
+            Color::from_rgba8(255, 205, 205, 205),
+            Color::from_rgba8(165, 24, 24, 252),
         );
     }
 
@@ -688,6 +891,7 @@ struct App {
     meters_per_pixel: f32,
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
+    last_plus_click: Option<Instant>,
     restored_window_pos: Option<(i32, i32)>,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
@@ -724,6 +928,7 @@ impl App {
                 .unwrap_or(0.0),
             distance_editor: None,
             last_distance_click: None,
+            last_plus_click: None,
             restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
@@ -747,6 +952,19 @@ impl App {
                 y: vertex.y + by * HELPER_DISTANCE,
             },
         )
+    }
+
+    fn snap_helper_to_hypotenuse_midpoint(&mut self) {
+        if self.helper_point.is_none() {
+            return;
+        }
+        self.helper_point = Some(Point {
+            x: (self.points[0].x + self.points[2].x) * 0.5,
+            y: (self.points[0].y + self.points[2].y) * 0.5,
+        });
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
     }
 
     fn toggle_angle_lock(&mut self) {
@@ -1283,6 +1501,28 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
+                            if let Some(helper) = self.helper_point {
+                                if in_helper_handle(pos, helper) {
+                                    let now = Instant::now();
+                                    let is_double = self
+                                        .last_plus_click
+                                        .map(|last| {
+                                            now.duration_since(last) <= Duration::from_millis(450)
+                                        })
+                                        .unwrap_or(false);
+                                    if is_double {
+                                        self.last_plus_click = None;
+                                        self.active_handle = None;
+                                        self.snap_helper_to_hypotenuse_midpoint();
+                                    } else {
+                                        self.last_plus_click = Some(now);
+                                        self.active_handle = Some(HELPER_HANDLE_INDEX);
+                                    }
+                                    return;
+                                }
+                            }
+                            self.last_plus_click = None;
+
                             if let Some(kind) = self.distance_panel_at(pos) {
                                 let now = Instant::now();
                                 let is_double = self

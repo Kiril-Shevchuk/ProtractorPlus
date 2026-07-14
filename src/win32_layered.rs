@@ -122,7 +122,7 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
     append_toggle_item(
         menu,
         MENU_PLUS_DEGREES,
-        "+ градуси",
+        "Градуси +",
         state.plus_degrees,
     );
     append_toggle_item(menu, MENU_INVERSION, "Інверсія", state.inversion);
