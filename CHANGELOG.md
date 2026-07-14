@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.0
+
+- Added a centered startup splash screen using the ProtractorPlus icon.
+- The splash occupies approximately 20% of the primary monitor and remains visible for 1.8 seconds.
+- Added the white Comfortaa signature `Cb prod.` in the lower-right corner of the splash icon.
+- The measuring tool is centered on the primary monitor after every launch.
+- Saved geometry and feature settings remain available, while the previous window position is intentionally ignored at startup.
+
 ## 1.9.1
 
 - при одночасно закритих синьому та червоному замках повністю заблоковано зміну кута й обертання системи;

@@ -3,6 +3,7 @@
 mod distance;
 mod draw;
 mod icon;
+mod splash;
 mod text;
 mod win32_layered;
 
@@ -25,9 +26,9 @@ use draw::{
 };
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -51,6 +52,24 @@ const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
 const PLUS_HIT_RADIUS: f32 = 14.0;
+const SPLASH_SCREEN_FRACTION: f32 = 0.20;
+const SPLASH_MIN_SIZE: u32 = 160;
+const SPLASH_MAX_SIZE: u32 = 420;
+const SPLASH_DURATION: Duration = Duration::from_millis(1800);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupPhase {
+    Splash,
+    Tool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MonitorGeometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -1012,7 +1031,10 @@ struct App {
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
     last_red_click: Option<(usize, Instant)>,
-    restored_window_pos: Option<(i32, i32)>,
+    startup_phase: StartupPhase,
+    splash_deadline: Option<Instant>,
+    startup_monitor: Option<MonitorGeometry>,
+    center_after_resize: bool,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
 }
@@ -1051,10 +1073,68 @@ impl App {
             last_distance_click: None,
             last_plus_click: None,
             last_red_click: None,
-            restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
+            startup_phase: StartupPhase::Splash,
+            splash_deadline: None,
+            startup_monitor: None,
+            center_after_resize: false,
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
         }
+    }
+
+    fn detect_startup_monitor(event_loop: &ActiveEventLoop) -> MonitorGeometry {
+        let monitor = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next());
+
+        if let Some(monitor) = monitor {
+            let position = monitor.position();
+            let size = monitor.size();
+            MonitorGeometry {
+                x: position.x,
+                y: position.y,
+                width: size.width.max(1),
+                height: size.height.max(1),
+            }
+        } else {
+            MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }
+        }
+    }
+
+    fn splash_size(monitor: MonitorGeometry) -> u32 {
+        ((monitor.width.min(monitor.height) as f32 * SPLASH_SCREEN_FRACTION).round() as u32)
+            .clamp(SPLASH_MIN_SIZE, SPLASH_MAX_SIZE)
+    }
+
+    fn center_window_on_startup_monitor(&self) {
+        let (Some(window), Some(monitor)) = (&self.window, self.startup_monitor) else {
+            return;
+        };
+        let size = window.inner_size();
+        let x = monitor.x + (monitor.width as i64 - size.width as i64).max(0) as i32 / 2;
+        let y = monitor.y + (monitor.height as i64 - size.height as i64).max(0) as i32 / 2;
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
+
+    fn finish_splash(&mut self) {
+        if self.startup_phase != StartupPhase::Splash {
+            return;
+        }
+
+        self.startup_phase = StartupPhase::Tool;
+        self.splash_deadline = None;
+        if let Some(window) = &self.window {
+            window.set_resizable(true);
+        }
+        self.center_after_resize = true;
+        self.fit_window_to_content();
+        self.center_window_on_startup_monitor();
+        self.request_redraw();
     }
 
     fn current_signed_angle(&self) -> f32 {
@@ -1299,6 +1379,18 @@ impl App {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+
+        if self.startup_phase == StartupPhase::Splash {
+            let pixmap = splash::render_splash(width, height);
+            let pos = window
+                .outer_position()
+                .unwrap_or(PhysicalPosition::new(0, 0));
+            unsafe {
+                present_pixmap(hwnd, &pixmap, pos.x, pos.y);
+            }
+            return;
+        }
+
         let mut pixmap = draw::render_angle_measure(width, height, self.points, self.inverted);
 
         if self.hypotenuse_visible {
@@ -1597,29 +1689,39 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+
+        let monitor = Self::detect_startup_monitor(event_loop);
+        let splash_size = Self::splash_size(monitor);
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title("ProtractorPlus")
-                        .with_inner_size(LogicalSize::new(640.0, 420.0))
+                        .with_inner_size(PhysicalSize::new(splash_size, splash_size))
                         .with_transparent(true)
                         .with_decorations(false)
-                        .with_resizable(true)
+                        .with_resizable(false)
                         .with_window_icon(Some(icon::window_icon())),
                 )
                 .expect("create window"),
         );
-        if let Some((x, y)) = self.restored_window_pos.take() {
-            window.set_outer_position(PhysicalPosition::new(x, y));
-        }
-        let hwnd = hwnd_from_window(&window);
-        unsafe {
-            configure_overlay(hwnd);
-        }
+
+        self.startup_monitor = Some(monitor);
+        self.splash_deadline = Some(Instant::now() + SPLASH_DURATION);
         self.window = Some(window);
-        self.fit_window_to_content();
-        self.redraw();
+        self.center_window_on_startup_monitor();
+
+        if let Some(window) = &self.window {
+            let hwnd = hwnd_from_window(window);
+            unsafe {
+                configure_overlay(hwnd);
+            }
+            window.request_redraw();
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            self.splash_deadline.expect("splash deadline"),
+        ));
     }
 
     fn window_event(
@@ -1628,6 +1730,22 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.startup_phase == StartupPhase::Splash {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::RedrawRequested => self.redraw(),
+                WindowEvent::Resized(_) | WindowEvent::Moved(_) => self.request_redraw(),
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed
+                        && event.logical_key == Key::Named(NamedKey::Escape) =>
+                {
+                    event_loop.exit();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 self.save_state();
@@ -1648,7 +1766,19 @@ impl ApplicationHandler for App {
                     self.was_minimized = minimized;
                 }
             }
-            WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+            WindowEvent::Resized(_) => {
+                if self.center_after_resize {
+                    self.center_window_on_startup_monitor();
+                    self.center_after_resize = false;
+                }
+                if let Some(window) = &self.window {
+                    let hwnd = hwnd_from_window(window);
+                    if !unsafe { is_minimized(hwnd) } {
+                        window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::Moved(_) => {
                 if let Some(window) = &self.window {
                     let hwnd = hwnd_from_window(window);
                     if !unsafe { is_minimized(hwnd) } {
@@ -1925,7 +2055,21 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.startup_phase == StartupPhase::Splash {
+            let deadline = self
+                .splash_deadline
+                .unwrap_or_else(|| Instant::now() + SPLASH_DURATION);
+            if Instant::now() >= deadline {
+                self.finish_splash();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+            return;
+        }
+
+        event_loop.set_control_flow(ControlFlow::Wait);
         let Some(window) = &self.window else {
             return;
         };
