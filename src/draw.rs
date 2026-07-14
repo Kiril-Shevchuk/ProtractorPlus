@@ -8,11 +8,11 @@ pub struct Point {
 }
 
 pub const HANDLE_RADIUS: f32 = 10.5;
-const LABEL_FONT_SIZE: f32 = 14.0;
-const LABEL_PAD_X: f32 = 8.0;
-const LABEL_PAD_Y: f32 = 6.0;
-const LABEL_MIN_HEIGHT: f32 = 24.0;
-const LABEL_RADIUS: f32 = 6.0;
+const LABEL_FONT_SIZE: f32 = 16.5;
+const LABEL_PAD_X: f32 = 10.0;
+const LABEL_PAD_Y: f32 = 7.0;
+const LABEL_MIN_HEIGHT: f32 = 28.0;
+const LABEL_RADIUS: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContentBounds {
@@ -20,6 +20,14 @@ pub struct ContentBounds {
     pub min_y: f32,
     pub max_x: f32,
     pub max_y: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PanelRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 pub fn angle_between(a: Point, vertex: Point, b: Point) -> f32 {
@@ -50,16 +58,26 @@ fn label_center(a: Point, vertex: Point, b: Point) -> (f32, f32) {
         dx /= length;
         dy /= length;
     }
-    (vertex.x + dx * 34.0, vertex.y + dy * 34.0)
+    (vertex.x + dx * 35.0, vertex.y + dy * 35.0)
 }
 
-fn label_metrics(a: Point, vertex: Point, b: Point) -> (f32, f32, f32, f32) {
+pub fn label_metrics(a: Point, vertex: Point, b: Point) -> (f32, f32, f32, f32) {
     let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
     let layout = layout_text(&label, LABEL_FONT_SIZE);
     let (cx, cy) = label_center(a, vertex, b);
     let width = layout.width + 2.0 * LABEL_PAD_X;
     let height = (layout.height + 2.0 * LABEL_PAD_Y).max(LABEL_MIN_HEIGHT);
     (width, height, cx, cy)
+}
+
+pub fn label_panel_rect(points: [Point; 3]) -> PanelRect {
+    let (width, height, cx, cy) = label_metrics(points[0], points[1], points[2]);
+    PanelRect {
+        x: cx - width * 0.5,
+        y: cy - height * 0.5,
+        width,
+        height,
+    }
 }
 
 pub fn content_bounds(points: [Point; 3]) -> ContentBounds {
@@ -70,11 +88,11 @@ pub fn content_bounds(points: [Point; 3]) -> ContentBounds {
     let mut min_y = a.y.min(vertex.y).min(b.y) - HANDLE_RADIUS;
     let mut max_x = a.x.max(vertex.x).max(b.x) + HANDLE_RADIUS;
     let mut max_y = a.y.max(vertex.y).max(b.y) + HANDLE_RADIUS;
-    let (width, height, cx, cy) = label_metrics(a, vertex, b);
-    min_x = min_x.min(cx - width / 2.0);
-    min_y = min_y.min(cy - height / 2.0);
-    max_x = max_x.max(cx + width / 2.0);
-    max_y = max_y.max(cy + height / 2.0);
+    let panel = label_panel_rect(points);
+    min_x = min_x.min(panel.x);
+    min_y = min_y.min(panel.y);
+    max_x = max_x.max(panel.x + panel.width);
+    max_y = max_y.max(panel.y + panel.height);
     ContentBounds {
         min_x,
         min_y,
@@ -93,7 +111,6 @@ pub fn rounded_rect_path(x: f32, y: f32, width: f32, height: f32, radius: f32) -
         return tiny_skia::Rect::from_xywh(x, y, width, height).map(PathBuilder::from_rect);
     }
 
-    // Standard cubic-Bezier approximation of a quarter circle.
     const KAPPA: f32 = 0.552_284_8;
     let control = radius * KAPPA;
     let right = x + width;
@@ -257,18 +274,20 @@ pub fn render_angle_measure(width: u32, height: u32, points: [Point; 3]) -> Pixm
 
     let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
     let layout = layout_text(&label, LABEL_FONT_SIZE);
-    let (panel_width, panel_height, cx, cy) = label_metrics(a, vertex, b);
+    let panel = label_panel_rect(points);
+    let cx = panel.x + panel.width * 0.5;
+    let cy = panel.y + panel.height * 0.5;
+
     fill_rounded_rect(
         &mut pixmap,
-        cx - panel_width / 2.0,
-        cy - panel_height / 2.0,
-        panel_width,
-        panel_height,
+        panel.x,
+        panel.y,
+        panel.width,
+        panel.height,
         LABEL_RADIUS,
-        Color::from_rgba8(255, 255, 255, 155),
+        Color::from_rgba8(255, 255, 255, 148),
     );
 
-    // Center the actual glyph bounds, not only the font advance box.
     let text_x = cx - (layout.xmin + layout.xmax) * 0.5;
     let baseline = cy + (layout.ymin + layout.ymax) * 0.5;
     draw_text(
@@ -277,7 +296,7 @@ pub fn render_angle_measure(width: u32, height: u32, points: [Point; 3]) -> Pixm
         text_x,
         baseline,
         LABEL_FONT_SIZE,
-        Color::from_rgba8(20, 20, 20, 245),
+        Color::from_rgba8(18, 18, 18, 248),
     );
 
     pixmap

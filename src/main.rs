@@ -11,11 +11,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use draw::{content_bounds, fill_rounded_rect, Point, HANDLE_RADIUS};
+use draw::{content_bounds, fill_rounded_rect, label_panel_rect, Point, HANDLE_RADIUS};
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -31,10 +31,9 @@ static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 const CONTENT_PAD: f32 = 42.0;
 const MIN_WINDOW: f32 = 96.0;
 const MAX_LINE_LEN: f32 = 1000.0;
-const LOCK_SIZE: f32 = 22.0;
-const LOCK_PANEL_SIZE: f32 = 31.0;
-const LOCK_PANEL_RADIUS: f32 = 7.0;
-const LOCK_DISTANCE: f32 = 48.0;
+const LOCK_PANEL_SIZE: f32 = 15.5;
+const LOCK_PANEL_RADIUS: f32 = 3.5;
+const LOCK_DISTANCE: f32 = 34.0;
 const EPSILON: f32 = 0.0001;
 
 #[derive(Clone, Copy, Debug)]
@@ -161,9 +160,18 @@ fn angle_bisector_direction(points: [Point; 3]) -> Option<(f32, f32)> {
 fn lock_center(points: [Point; 3]) -> Point {
     let vertex = points[1];
     let (bx, by) = angle_bisector_direction(points).unwrap_or((0.0, 1.0));
+
+    // Place the lock on the side opposite the bisector, while slightly biasing it
+    // upward so it naturally stays above the blue vertex when the angle rotates.
+    let mut dx = -bx;
+    let mut dy = -by - 0.55;
+    let len = (dx * dx + dy * dy).sqrt().max(EPSILON);
+    dx /= len;
+    dy /= len;
+
     Point {
-        x: vertex.x - bx * LOCK_DISTANCE,
-        y: vertex.y - by * LOCK_DISTANCE,
+        x: vertex.x + dx * LOCK_DISTANCE,
+        y: vertex.y + dy * LOCK_DISTANCE,
     }
 }
 
@@ -174,6 +182,14 @@ fn in_lock_button(point: Point, points: [Point; 3]) -> bool {
         && point.x <= center.x + half
         && point.y >= center.y - half
         && point.y <= center.y + half
+}
+
+fn in_angle_label(point: Point, points: [Point; 3]) -> bool {
+    let panel = label_panel_rect(points);
+    point.x >= panel.x
+        && point.x <= panel.x + panel.width
+        && point.y >= panel.y
+        && point.y <= panel.y + panel.height
 }
 
 fn stroke_segment(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: Color) {
@@ -241,34 +257,36 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
         Color::from_rgba8(45, 45, 45, 235)
     };
 
-    let body = Rect::from_xywh(center.x - 6.0, center.y - 1.0, 12.0, 10.0);
+    let body = Rect::from_xywh(center.x - 3.0, center.y - 0.5, 6.0, 5.0);
     if let Some(body) = body {
         let mut paint = Paint::default();
         paint.set_color(icon_color);
+        paint.anti_alias = true;
         pixmap.fill_rect(body, &paint, Transform::identity(), None);
     }
 
-    // Дужка замка. У відкритому стані права ніжка відсунута.
-    let right_x = if locked { center.x + 5.0 } else { center.x + 8.0 };
+    // Дужка замка. У відкритому стані права ніжка трохи відсунута.
+    let right_x = if locked { center.x + 2.5 } else { center.x + 4.0 };
     let mut builder = PathBuilder::new();
-    builder.move_to(center.x - 5.0, center.y - 1.0);
-    builder.line_to(center.x - 5.0, center.y - 5.0);
+    builder.move_to(center.x - 2.5, center.y - 0.5);
+    builder.line_to(center.x - 2.5, center.y - 2.5);
     builder.cubic_to(
-        center.x - 5.0,
-        center.y - 11.0,
+        center.x - 2.5,
+        center.y - 5.5,
         right_x,
-        center.y - 11.0,
+        center.y - 5.5,
         right_x,
-        center.y - 5.0,
+        center.y - 2.5,
     );
     if locked {
-        builder.line_to(right_x, center.y - 1.0);
+        builder.line_to(right_x, center.y - 0.5);
     }
     if let Some(path) = builder.finish() {
         let mut paint = Paint::default();
         paint.set_color(icon_color);
+        paint.anti_alias = true;
         let stroke = Stroke {
-            width: 2.2,
+            width: 1.1,
             ..Stroke::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
@@ -276,9 +294,15 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
 
     stroke_segment(
         pixmap,
-        Point { x: center.x, y: center.y + 2.0 },
-        Point { x: center.x, y: center.y + 6.0 },
-        1.5,
+        Point {
+            x: center.x,
+            y: center.y + 1.0,
+        },
+        Point {
+            x: center.x,
+            y: center.y + 3.0,
+        },
+        0.8,
         Color::from_rgba8(255, 255, 255, 245),
     );
 }
@@ -292,6 +316,7 @@ struct App {
     angle_locked: bool,
     locked_signed_angle: f32,
     restored_window_pos: Option<(i32, i32)>,
+    wheel_accumulator: f32,
 }
 
 impl App {
@@ -308,6 +333,7 @@ impl App {
                 .map(|state| state.locked_signed_angle)
                 .unwrap_or(0.0),
             restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
+            wheel_accumulator: 0.0,
         }
     }
 
@@ -376,6 +402,29 @@ impl App {
             .unwrap_or(PhysicalPosition::new(0, 0));
         unsafe {
             present_pixmap(hwnd, &pixmap, pos.x, pos.y);
+        }
+    }
+
+    fn adjust_angle_by_degrees(&mut self, delta_deg: f32) {
+        let vertex = self.points[1];
+        let current_signed = self.current_signed_angle();
+        let current_abs_deg = current_signed.abs().to_degrees();
+        let target_abs_deg = (current_abs_deg + delta_deg).clamp(1.0, 179.0);
+        let sign = if current_signed < 0.0 { -1.0 } else { 1.0 };
+        let new_signed = sign * target_abs_deg.to_radians();
+
+        let a_angle = vector_angle(vertex, self.points[0]);
+        let center_angle = normalize_signed_angle(a_angle + current_signed * 0.5);
+        let shared_radius = ((vector_length(vertex, self.points[0])
+            + vector_length(vertex, self.points[2]))
+            * 0.5)
+            .clamp(HANDLE_RADIUS + 8.0, MAX_LINE_LEN);
+
+        self.points[0] = point_from_polar(vertex, center_angle - new_signed * 0.5, shared_radius);
+        self.points[2] = point_from_polar(vertex, center_angle + new_signed * 0.5, shared_radius);
+
+        if self.angle_locked {
+            self.locked_signed_angle = new_signed;
         }
     }
 }
@@ -517,6 +566,32 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.active_handle.is_some() {
+                    return;
+                }
+                let Some(cursor) = self.cursor_pos else {
+                    return;
+                };
+                if !in_angle_label(cursor, self.points) {
+                    self.wheel_accumulator = 0.0;
+                    return;
+                }
+
+                let wheel_units = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 50.0,
+                };
+                self.wheel_accumulator += wheel_units;
+                let whole_steps = self.wheel_accumulator.trunc() as i32;
+                if whole_steps != 0 {
+                    self.wheel_accumulator -= whole_steps as f32;
+                    self.adjust_angle_by_degrees(whole_steps as f32);
+                    self.fit_window_to_content();
+                    self.save_state();
+                    self.request_redraw();
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some(Point {
                     x: position.x as f32,
@@ -620,7 +695,6 @@ impl App {
 
     fn move_handle(&mut self, index: usize, target: Point) {
         if index == 1 {
-            // Переміщення вершини завжди переносить увесь кут без зміни геометрії.
             let old_vertex = self.points[1];
             let a_off = (
                 self.points[0].x - old_vertex.x,
@@ -656,8 +730,6 @@ impl App {
         }
 
         if !self.angle_locked {
-            // Обидва промені завжди мають однакову довжину. Кут при цьому
-            // залишається вільним: другий промінь зберігає свій напрямок.
             let other_index = if index == 0 { 2 } else { 0 };
             let other_angle = vector_angle(vertex, self.points[other_index]);
             self.points[index] = moved;

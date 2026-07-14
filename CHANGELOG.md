@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0
+
+- embedded the Comfortaa variable font for the degree label;
+- increased the degree-label rasterization size for improved readability;
+- reduced the lock panel and lock icon by 50%;
+- added 1-degree mouse-wheel adjustment while hovering over the degree panel;
+- preserved the angle bisector and equal ray lengths during wheel adjustment.
+
 ## 1.2.0
 
 - centered the degree text horizontally and vertically;

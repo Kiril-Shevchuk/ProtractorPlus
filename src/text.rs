@@ -7,19 +7,14 @@ static FONT: OnceLock<Font> = OnceLock::new();
 
 fn ui_font() -> &'static Font {
     FONT.get_or_init(|| {
-        let paths = [
-            r"C:\Windows\Fonts\segoeui.ttf",
-            r"C:\Windows\Fonts\arial.ttf",
-            r"C:\Windows\Fonts\tahoma.ttf",
-        ];
-        for path in paths {
-            if let Ok(data) = std::fs::read(path) {
-                if let Ok(font) = Font::from_bytes(data, fontdue::FontSettings::default()) {
-                    return font;
-                }
-            }
-        }
-        panic!("ProtractorPlus could not load a Windows UI font");
+        let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/comfortaa-variable.ttf"));
+        Font::from_bytes(&bytes[..], fontdue::FontSettings {
+            // The degree label is rendered near this size, so optimizing the
+            // outlines around 18 px keeps the small text crisp.
+            scale: 18.0,
+            ..fontdue::FontSettings::default()
+        })
+        .expect("ProtractorPlus could not load the embedded Comfortaa font")
     })
 }
 
