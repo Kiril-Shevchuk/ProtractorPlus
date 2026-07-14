@@ -1,6 +1,6 @@
 [package]
 name = "protractor_plus"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2021"
 description = "Always-on-top transparent angle-measuring overlay for Windows"
 license = "GPL-3.0-only"
@@ -29,3 +29,4 @@ panic = "abort"
 
 [build-dependencies]
 google-fonts = "=0.1.5"
+winresource = "=0.1.31"
