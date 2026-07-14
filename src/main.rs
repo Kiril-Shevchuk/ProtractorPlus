@@ -46,6 +46,7 @@ const MAX_LINE_LEN: f32 = 1000.0;
 const LOCK_PANEL_SIZE: f32 = 15.5;
 const LOCK_PANEL_RADIUS: f32 = 3.5;
 const LOCK_DISTANCE: f32 = 34.0;
+const RED_LOCK_DISTANCE: f32 = 27.0;
 const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
@@ -57,6 +58,7 @@ struct SavedState {
     helper_point: Option<Point>,
     angle_locked: bool,
     locked_signed_angle: f32,
+    red_locked_index: Option<usize>,
     bisector_visible: bool,
     plus_degrees_visible: bool,
     inverted: bool,
@@ -115,6 +117,7 @@ fn load_state() -> Option<SavedState> {
             helper_point: None,
             angle_locked: parse_next::<u8>(&mut values)? != 0,
             locked_signed_angle: parse_next(&mut values)?,
+            red_locked_index: None,
             bisector_visible: true,
             plus_degrees_visible: false,
             inverted: false,
@@ -137,8 +140,8 @@ fn load_state() -> Option<SavedState> {
                 }),
                 angle_locked: parse_next::<u8>(&mut values)? != 0,
                 locked_signed_angle: parse_next(&mut values)?,
+                red_locked_index: None,
                 bisector_visible: true,
-                // Versions 1.4.x always displayed these labels.
                 plus_degrees_visible: helper_enabled,
                 inverted: false,
                 hypotenuse_visible: false,
@@ -161,6 +164,7 @@ fn load_state() -> Option<SavedState> {
                 }),
                 angle_locked: parse_next::<u8>(&mut values)? != 0,
                 locked_signed_angle: parse_next(&mut values)?,
+                red_locked_index: None,
                 bisector_visible: parse_next::<u8>(&mut values)? != 0,
                 plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
                 inverted: parse_next::<u8>(&mut values)? != 0,
@@ -184,6 +188,38 @@ fn load_state() -> Option<SavedState> {
                 }),
                 angle_locked: parse_next::<u8>(&mut values)? != 0,
                 locked_signed_angle: parse_next(&mut values)?,
+                red_locked_index: None,
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        5 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let angle_locked = parse_next::<u8>(&mut values)? != 0;
+            let locked_signed_angle = parse_next(&mut values)?;
+            let red_lock_code: u8 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                }),
+                angle_locked,
+                locked_signed_angle,
+                red_locked_index: match red_lock_code {
+                    1 => Some(0),
+                    2 => Some(2),
+                    _ => None,
+                },
                 bisector_visible: parse_next::<u8>(&mut values)? != 0,
                 plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
                 inverted: parse_next::<u8>(&mut values)? != 0,
@@ -299,6 +335,52 @@ fn in_lock_button(point: Point, points: [Point; 3]) -> bool {
         && point.y <= center.y + half
 }
 
+fn red_lock_center(points: [Point; 3], index: usize) -> Point {
+    let vertex = points[1];
+    let red = points[index];
+    let other = points[if index == 0 { 2 } else { 0 }];
+    let dx = red.x - vertex.x;
+    let dy = red.y - vertex.y;
+    let length = (dx * dx + dy * dy).sqrt().max(EPSILON);
+    let ux = dx / length;
+    let uy = dy / length;
+    let other_x = other.x - vertex.x;
+    let other_y = other.y - vertex.y;
+    let cross = ux * other_y - uy * other_x;
+
+    // Pick the normal on the exterior side of the main sector.
+    let (nx, ny) = if cross >= 0.0 {
+        (uy, -ux)
+    } else {
+        (-uy, ux)
+    };
+
+    Point {
+        x: red.x + nx * RED_LOCK_DISTANCE,
+        y: red.y + ny * RED_LOCK_DISTANCE,
+    }
+}
+
+fn in_red_lock_button(point: Point, points: [Point; 3]) -> Option<usize> {
+    let half = LOCK_PANEL_SIZE * 0.5 + 4.0;
+    [0usize, 2usize].into_iter().find(|index| {
+        let center = red_lock_center(points, *index);
+        point.x >= center.x - half
+            && point.x <= center.x + half
+            && point.y >= center.y - half
+            && point.y <= center.y + half
+    })
+}
+
+fn red_point_at(point: Point, points: [Point; 3]) -> Option<usize> {
+    let hit_radius = HANDLE_RADIUS + 6.0;
+    [0usize, 2usize].into_iter().find(|index| {
+        let dx = points[*index].x - point.x;
+        let dy = points[*index].y - point.y;
+        dx * dx + dy * dy <= hit_radius * hit_radius
+    })
+}
+
 fn in_angle_label(point: Point, points: [Point; 3]) -> bool {
     let panel = label_panel_rect(points);
     point.x >= panel.x
@@ -392,8 +474,13 @@ fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3], inverted: bool)
     }
 }
 
-fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverted: bool) {
-    let center = lock_center(points);
+fn draw_lock_at(
+    pixmap: &mut Pixmap,
+    center: Point,
+    locked: bool,
+    locked_color: Color,
+    open_color: Color,
+) {
     fill_rounded_rect(
         pixmap,
         center.x - LOCK_PANEL_SIZE * 0.5,
@@ -404,13 +491,7 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverte
         Color::from_rgba8(255, 255, 255, 155),
     );
 
-    let icon_color = if locked {
-        Color::from_rgba8(32, 105, 218, 255)
-    } else if inverted {
-        Color::from_rgba8(245, 245, 245, 245)
-    } else {
-        Color::from_rgba8(45, 45, 45, 235)
-    };
+    let icon_color = if locked { locked_color } else { open_color };
 
     if let Some(body) = Rect::from_xywh(center.x - 3.0, center.y - 0.5, 6.0, 5.0) {
         let mut paint = Paint::default();
@@ -462,6 +543,43 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverte
         1.0,
         Color::from_rgba8(255, 255, 255, 245),
     );
+}
+
+fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverted: bool) {
+    let open_color = if inverted {
+        Color::from_rgba8(245, 245, 245, 245)
+    } else {
+        Color::from_rgba8(45, 45, 45, 235)
+    };
+    draw_lock_at(
+        pixmap,
+        lock_center(points),
+        locked,
+        Color::from_rgba8(32, 105, 218, 255),
+        open_color,
+    );
+}
+
+fn draw_red_lock_icons(
+    pixmap: &mut Pixmap,
+    points: [Point; 3],
+    locked_index: Option<usize>,
+    inverted: bool,
+) {
+    let open_color = if inverted {
+        Color::from_rgba8(255, 225, 225, 245)
+    } else {
+        Color::from_rgba8(110, 45, 45, 235)
+    };
+    for index in [0usize, 2usize] {
+        draw_lock_at(
+            pixmap,
+            red_lock_center(points, index),
+            locked_index == Some(index),
+            Color::from_rgba8(224, 55, 55, 255),
+            open_color,
+        );
+    }
 }
 
 fn draw_dash_dot_line(
@@ -882,6 +1000,7 @@ struct App {
     was_minimized: bool,
     angle_locked: bool,
     locked_signed_angle: f32,
+    red_locked_index: Option<usize>,
     bisector_visible: bool,
     plus_degrees_visible: bool,
     inverted: bool,
@@ -892,6 +1011,7 @@ struct App {
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
+    last_red_click: Option<(usize, Instant)>,
     restored_window_pos: Option<(i32, i32)>,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
@@ -911,6 +1031,7 @@ impl App {
             locked_signed_angle: saved
                 .map(|state| state.locked_signed_angle)
                 .unwrap_or(0.0),
+            red_locked_index: saved.and_then(|state| state.red_locked_index),
             bisector_visible: saved.map(|state| state.bisector_visible).unwrap_or(true),
             plus_degrees_visible: saved
                 .map(|state| state.plus_degrees_visible)
@@ -929,6 +1050,7 @@ impl App {
             distance_editor: None,
             last_distance_click: None,
             last_plus_click: None,
+            last_red_click: None,
             restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
@@ -963,6 +1085,48 @@ impl App {
             y: (self.points[0].y + self.points[2].y) * 0.5,
         });
         self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+
+    fn snap_hypotenuse_midpoint_to_helper(&mut self) {
+        let Some(helper) = self.helper_point else {
+            return;
+        };
+        let midpoint = Point {
+            x: (self.points[0].x + self.points[2].x) * 0.5,
+            y: (self.points[0].y + self.points[2].y) * 0.5,
+        };
+        let dx = helper.x - midpoint.x;
+        let dy = helper.y - midpoint.y;
+
+        // Translate the complete base angle. The green plus stays fixed, while
+        // the hypotenuse midpoint is placed exactly over it.
+        for point in &mut self.points {
+            point.x += dx;
+            point.y += dy;
+        }
+        if self.angle_locked {
+            self.locked_signed_angle = self.current_signed_angle();
+        }
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn toggle_red_lock(&mut self, index: usize) {
+        if index != 0 && index != 2 {
+            return;
+        }
+        self.red_locked_index = if self.red_locked_index == Some(index) {
+            None
+        } else {
+            Some(index)
+        };
+        if self.angle_locked {
+            self.locked_signed_angle = self.current_signed_angle();
+        }
         self.save_state();
         self.request_redraw();
     }
@@ -1055,8 +1219,13 @@ impl App {
         let p = self.points;
         let helper_enabled = u8::from(self.helper_point.is_some());
         let helper = self.helper_point.unwrap_or(Point { x: 0.0, y: 0.0 });
+        let red_lock_code = match self.red_locked_index {
+            Some(0) => 1u8,
+            Some(2) => 2u8,
+            _ => 0u8,
+        };
         let text = format!(
-            "4\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
+            "5\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
@@ -1068,6 +1237,7 @@ impl App {
             helper.y,
             u8::from(self.angle_locked),
             self.locked_signed_angle,
+            red_lock_code,
             u8::from(self.bisector_visible),
             u8::from(self.plus_degrees_visible),
             u8::from(self.inverted),
@@ -1134,6 +1304,12 @@ impl App {
             &mut pixmap,
             self.points,
             self.angle_locked,
+            self.inverted,
+        );
+        draw_red_lock_icons(
+            &mut pixmap,
+            self.points,
+            self.red_locked_index,
             self.inverted,
         );
 
@@ -1351,6 +1527,22 @@ impl App {
         }
     }
 
+
+    fn rotate_about_red_lock_by_degrees(&mut self, index: usize, visual_degrees: f32) {
+        if index != 0 && index != 2 {
+            return;
+        }
+        let pivot = self.points[index];
+        let other = if index == 0 { 2 } else { 0 };
+        let delta = visual_degrees.to_radians();
+
+        for moving_index in [1usize, other] {
+            let angle = vector_angle(pivot, self.points[moving_index]) + delta;
+            let radius = vector_length(pivot, self.points[moving_index]);
+            self.points[moving_index] = point_from_polar(pivot, angle, radius);
+        }
+    }
+
     fn wheel_units(delta: MouseScrollDelta) -> f32 {
         match delta {
             MouseScrollDelta::LineDelta(_, y) => y,
@@ -1523,6 +1715,28 @@ impl ApplicationHandler for App {
                             }
                             self.last_plus_click = None;
 
+                            if let Some(index) = red_point_at(pos, self.points) {
+                                let now = Instant::now();
+                                let is_double = self
+                                    .last_red_click
+                                    .as_ref()
+                                    .map(|(previous, time)| {
+                                        *previous == index
+                                            && time.elapsed() <= Duration::from_millis(450)
+                                    })
+                                    .unwrap_or(false);
+                                if is_double {
+                                    self.last_red_click = None;
+                                    self.active_handle = None;
+                                    self.snap_hypotenuse_midpoint_to_helper();
+                                } else {
+                                    self.last_red_click = Some((index, now));
+                                    self.active_handle = Some(index);
+                                }
+                                return;
+                            }
+                            self.last_red_click = None;
+
                             if let Some(kind) = self.distance_panel_at(pos) {
                                 let now = Instant::now();
                                 let is_double = self
@@ -1543,6 +1757,10 @@ impl ApplicationHandler for App {
                             }
                             if self.distance_editor.is_some() {
                                 self.commit_distance_edit();
+                                return;
+                            }
+                            if let Some(index) = in_red_lock_button(pos, self.points) {
+                                self.toggle_red_lock(index);
                                 return;
                             }
                             if in_lock_button(pos, self.points) {
@@ -1575,7 +1793,38 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if self.angle_locked && in_lock_button(cursor, self.points) {
+                let blue_lock_hovered = in_lock_button(cursor, self.points);
+                let red_lock_hovered = in_red_lock_button(cursor, self.points);
+
+                if let Some(red_index) = self.red_locked_index {
+                    let active_red_lock_hovered = red_lock_hovered == Some(red_index);
+                    if self.angle_locked && (blue_lock_hovered || active_red_lock_hovered) {
+                        // Both locks are closed: global rotation is intentionally blocked.
+                        self.angle_wheel_accumulator = 0.0;
+                        self.rotation_wheel_accumulator = 0.0;
+                        return;
+                    }
+                    if !self.angle_locked && (blue_lock_hovered || active_red_lock_hovered) {
+                        self.angle_wheel_accumulator = 0.0;
+                        self.rotation_wheel_accumulator += wheel_units;
+                        let whole_steps = self.rotation_wheel_accumulator.trunc() as i32;
+                        if whole_steps != 0 {
+                            self.rotation_wheel_accumulator -= whole_steps as f32;
+                            // The locked red point is the pivot. Wheel up rotates
+                            // counter-clockwise, wheel down clockwise.
+                            self.rotate_about_red_lock_by_degrees(
+                                red_index,
+                                -(whole_steps as f32),
+                            );
+                            self.fit_window_to_content();
+                            self.save_state();
+                            self.request_redraw();
+                        }
+                        return;
+                    }
+                }
+
+                if self.angle_locked && blue_lock_hovered {
                     self.angle_wheel_accumulator = 0.0;
                     self.rotation_wheel_accumulator += wheel_units;
                     let whole_steps = self.rotation_wheel_accumulator.trunc() as i32;
@@ -1689,9 +1938,17 @@ impl App {
                 );
             }
         }
-        let lock = lock_center(self.points);
-        let min_x = bounds.min_x.min(lock.x - LOCK_PANEL_SIZE * 0.5);
-        let min_y = bounds.min_y.min(lock.y - LOCK_PANEL_SIZE * 0.5);
+        let lock_centers = [
+            lock_center(self.points),
+            red_lock_center(self.points, 0),
+            red_lock_center(self.points, 2),
+        ];
+        let mut min_x = bounds.min_x;
+        let mut min_y = bounds.min_y;
+        for center in lock_centers {
+            min_x = min_x.min(center.x - LOCK_PANEL_SIZE * 0.5);
+            min_y = min_y.min(center.y - LOCK_PANEL_SIZE * 0.5);
+        }
 
         let mut shift_x = 0.0f32;
         let mut shift_y = 0.0f32;
@@ -1738,12 +1995,22 @@ impl App {
                 );
             }
         }
-        let lock = lock_center(self.points);
-        let new_w = (bounds.max_x.max(lock.x + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
+        let lock_centers = [
+            lock_center(self.points),
+            red_lock_center(self.points, 0),
+            red_lock_center(self.points, 2),
+        ];
+        let mut max_x = bounds.max_x;
+        let mut max_y = bounds.max_y;
+        for center in lock_centers {
+            max_x = max_x.max(center.x + LOCK_PANEL_SIZE * 0.5);
+            max_y = max_y.max(center.y + LOCK_PANEL_SIZE * 0.5);
+        }
+        let new_w = (max_x + CONTENT_PAD)
             .ceil()
             .max(MIN_WINDOW)
             .min(8192.0) as u32;
-        let new_h = (bounds.max_y.max(lock.y + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
+        let new_h = (max_y + CONTENT_PAD)
             .ceil()
             .max(MIN_WINDOW)
             .min(8192.0) as u32;
@@ -1755,6 +2022,32 @@ impl App {
 
     fn move_handle(&mut self, index: usize, target: Point) {
         if index == 1 {
+            if let Some(red_index) = self.red_locked_index {
+                if !self.angle_locked {
+                    // With only a red lock closed, the red point becomes the
+                    // pivot. Dragging the blue vertex rotates the blue vertex
+                    // and the opposite red point as one rigid system.
+                    let pivot = self.points[red_index];
+                    let old_vertex = self.points[1];
+                    let target_radius = vector_length(pivot, target);
+                    if target_radius >= EPSILON {
+                        let old_angle = vector_angle(pivot, old_vertex);
+                        let new_angle = vector_angle(pivot, target);
+                        let delta = normalize_signed_angle(new_angle - old_angle);
+                        let blue_radius = vector_length(pivot, old_vertex);
+                        self.points[1] = point_from_polar(pivot, new_angle, blue_radius);
+
+                        let other_index = if red_index == 0 { 2 } else { 0 };
+                        let other_angle = vector_angle(pivot, self.points[other_index]) + delta;
+                        let other_radius = vector_length(pivot, self.points[other_index]);
+                        self.points[other_index] =
+                            point_from_polar(pivot, other_angle, other_radius);
+                    }
+                    return;
+                }
+            }
+
+            // Normal blue-point movement translates the complete construction.
             let old_vertex = self.points[1];
             let a_off = (
                 self.points[0].x - old_vertex.x,
@@ -1807,6 +2100,32 @@ impl App {
         let moved_radius = vector_length(vertex, moved);
         if moved_radius < EPSILON {
             return;
+        }
+
+        if self.angle_locked {
+            if let Some(red_index) = self.red_locked_index {
+                let other_index = if red_index == 0 { 2 } else { 0 };
+                let fixed_angle = vector_angle(vertex, self.points[red_index]);
+
+                if index == red_index {
+                    // Both locks closed: the locked ray keeps its absolute
+                    // direction. Dragging it changes only the shared length.
+                    let other_angle = vector_angle(vertex, self.points[other_index]);
+                    self.points[red_index] =
+                        point_from_polar(vertex, fixed_angle, moved_radius);
+                    self.points[other_index] =
+                        point_from_polar(vertex, other_angle, moved_radius);
+                } else {
+                    // The opposite red point may change the opening angle, but
+                    // the locked red ray remains fixed in the screen coordinate
+                    // system. Both red rays retain the same length.
+                    self.points[index] = moved;
+                    self.points[red_index] =
+                        point_from_polar(vertex, fixed_angle, moved_radius);
+                    self.locked_signed_angle = self.current_signed_angle();
+                }
+                return;
+            }
         }
 
         if !self.angle_locked {
