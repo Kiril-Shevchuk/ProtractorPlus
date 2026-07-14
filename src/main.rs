@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod distance;
 mod draw;
 mod icon;
 mod text;
@@ -11,7 +12,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use distance::{
+    distance_bounds, draw_distance_overlay, hit_test_distance_panel, meters_for_kind,
+    DistanceEditor, DistanceKind,
+};
 use draw::{
     angle_between, content_bounds, draw_arc, draw_plus_handle, draw_text_panel,
     fill_rounded_rect, label_panel_rect, stroke_line, text_panel_rect, ContentBounds, Point,
@@ -29,7 +35,7 @@ use crate::win32_layered::{
     configure_overlay, ensure_topmost, hwnd_from_window, is_minimized, minimize_window,
     present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
-    MENU_MINIMIZE, MENU_PLUS, MENU_PLUS_DEGREES,
+    MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_PLUS, MENU_PLUS_DEGREES,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -56,6 +62,8 @@ struct SavedState {
     inverted: bool,
     hypotenuse_visible: bool,
     front_plus_visible: bool,
+    distance_visible: bool,
+    meters_per_pixel: f32,
     window_x: i32,
     window_y: i32,
 }
@@ -112,6 +120,8 @@ fn load_state() -> Option<SavedState> {
             inverted: false,
             hypotenuse_visible: false,
             front_plus_visible: false,
+            distance_visible: false,
+            meters_per_pixel: 0.0,
             window_x: parse_next(&mut values)?,
             window_y: parse_next(&mut values)?,
         }),
@@ -133,6 +143,8 @@ fn load_state() -> Option<SavedState> {
                 inverted: false,
                 hypotenuse_visible: false,
                 front_plus_visible: false,
+                distance_visible: false,
+                meters_per_pixel: 0.0,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -154,6 +166,31 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: false,
+                meters_per_pixel: 0.0,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        4 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                }),
+                angle_locked: parse_next::<u8>(&mut values)? != 0,
+                locked_signed_angle: parse_next(&mut values)?,
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -647,6 +684,10 @@ struct App {
     inverted: bool,
     hypotenuse_visible: bool,
     front_plus_visible: bool,
+    distance_visible: bool,
+    meters_per_pixel: f32,
+    distance_editor: Option<DistanceEditor>,
+    last_distance_click: Option<(DistanceKind, Instant)>,
     restored_window_pos: Option<(i32, i32)>,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
@@ -677,6 +718,12 @@ impl App {
             front_plus_visible: saved
                 .map(|state| state.front_plus_visible)
                 .unwrap_or(false),
+            distance_visible: saved.map(|state| state.distance_visible).unwrap_or(false),
+            meters_per_pixel: saved
+                .map(|state| state.meters_per_pixel)
+                .unwrap_or(0.0),
+            distance_editor: None,
+            last_distance_click: None,
             restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
@@ -713,10 +760,34 @@ impl App {
 
     fn toggle_helper_point(&mut self) {
         self.helper_point = if self.helper_point.is_some() {
+            self.distance_visible = false;
+            self.distance_editor = None;
             None
         } else {
             Some(self.default_helper_point())
         };
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn toggle_distance_mode(&mut self) {
+        if self.distance_visible {
+            self.distance_visible = false;
+            self.distance_editor = None;
+        } else {
+            if self.helper_point.is_none() {
+                self.helper_point = Some(self.default_helper_point());
+            }
+            if let Some(helper) = self.helper_point {
+                let base_pixels = vector_length(self.points[1], helper);
+                if base_pixels > EPSILON {
+                    // The geometry present at activation is calibrated as 1000 metres.
+                    self.meters_per_pixel = 1000.0 / base_pixels;
+                }
+            }
+            self.distance_visible = true;
+        }
         self.fit_window_to_content();
         self.save_state();
         self.request_redraw();
@@ -733,6 +804,10 @@ impl App {
             MENU_INVERSION => self.inverted = !self.inverted,
             MENU_HYPOTENUSE => self.hypotenuse_visible = !self.hypotenuse_visible,
             MENU_FRONT_PLUS => self.front_plus_visible = !self.front_plus_visible,
+            MENU_DISTANCE_PLUS => {
+                self.toggle_distance_mode();
+                return;
+            }
             _ => return,
         }
         self.fit_window_to_content();
@@ -748,6 +823,7 @@ impl App {
             inversion: self.inverted,
             hypotenuse: self.hypotenuse_visible,
             front_plus: self.front_plus_visible,
+            distance_plus: self.distance_visible,
         }
     }
 
@@ -762,7 +838,7 @@ impl App {
         let helper_enabled = u8::from(self.helper_point.is_some());
         let helper = self.helper_point.unwrap_or(Point { x: 0.0, y: 0.0 });
         let text = format!(
-            "3\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
+            "4\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
@@ -779,6 +855,8 @@ impl App {
             u8::from(self.inverted),
             u8::from(self.hypotenuse_visible),
             u8::from(self.front_plus_visible),
+            u8::from(self.distance_visible),
+            self.meters_per_pixel,
             window_x,
             window_y,
         );
@@ -822,6 +900,17 @@ impl App {
                 self.plus_degrees_visible,
                 self.inverted,
             );
+            if self.distance_visible && self.meters_per_pixel > 0.0 {
+                draw_distance_overlay(
+                    &mut pixmap,
+                    self.points,
+                    helper,
+                    self.meters_per_pixel,
+                    self.hypotenuse_visible,
+                    self.front_plus_visible,
+                    self.distance_editor.as_ref(),
+                );
+            }
         }
         draw_lock_icon(
             &mut pixmap,
@@ -835,6 +924,177 @@ impl App {
             .unwrap_or(PhysicalPosition::new(0, 0));
         unsafe {
             present_pixmap(hwnd, &pixmap, pos.x, pos.y);
+        }
+    }
+
+    fn distance_panel_at(&self, point: Point) -> Option<DistanceKind> {
+        if !self.distance_visible || self.meters_per_pixel <= 0.0 {
+            return None;
+        }
+        let helper = self.helper_point?;
+        hit_test_distance_panel(
+            point,
+            self.points,
+            helper,
+            self.meters_per_pixel,
+            self.hypotenuse_visible,
+            self.front_plus_visible,
+            self.distance_editor.as_ref(),
+        )
+    }
+
+    fn begin_distance_edit(&mut self, kind: DistanceKind) {
+        let Some(helper) = self.helper_point else {
+            return;
+        };
+        let value = meters_for_kind(self.points, helper, self.meters_per_pixel, kind);
+        let buffer = if (value - value.round()).abs() < 0.01 {
+            format!("{:.0}", value)
+        } else {
+            let mut text = format!("{:.2}", value);
+            while text.ends_with('0') {
+                text.pop();
+            }
+            if text.ends_with('.') {
+                text.pop();
+            }
+            text
+        };
+        self.distance_editor = Some(DistanceEditor {
+            kind,
+            buffer,
+            replace_on_input: true,
+        });
+        self.fit_window_to_content();
+        self.request_redraw();
+    }
+
+    fn cancel_distance_edit(&mut self) {
+        self.distance_editor = None;
+        self.fit_window_to_content();
+        self.request_redraw();
+    }
+
+    fn commit_distance_edit(&mut self) {
+        let Some(editor) = self.distance_editor.take() else {
+            return;
+        };
+        let normalized = editor.buffer.replace(',', ".");
+        if let Ok(value) = normalized.parse::<f32>() {
+            if value.is_finite() && value > 0.0 {
+                self.apply_distance_value(editor.kind, value);
+            }
+        }
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn append_distance_input(&mut self, text: &str) {
+        let Some(editor) = &mut self.distance_editor else {
+            return;
+        };
+        let contains_input = text
+            .chars()
+            .any(|character| character.is_ascii_digit() || character == '.' || character == ',');
+        if editor.replace_on_input && contains_input {
+            editor.buffer.clear();
+            editor.replace_on_input = false;
+        }
+        for character in text.chars() {
+            if character.is_ascii_digit() && editor.buffer.len() < 12 {
+                editor.buffer.push(character);
+            } else if (character == '.' || character == ',')
+                && !editor.buffer.contains('.')
+                && !editor.buffer.contains(',')
+                && editor.buffer.len() < 12
+            {
+                editor.buffer.push('.');
+            }
+        }
+        self.fit_window_to_content();
+        self.request_redraw();
+    }
+
+    fn backspace_distance_input(&mut self) {
+        if let Some(editor) = &mut self.distance_editor {
+            if editor.replace_on_input {
+                editor.buffer.clear();
+                editor.replace_on_input = false;
+            } else {
+                editor.buffer.pop();
+            }
+            self.fit_window_to_content();
+            self.request_redraw();
+        }
+    }
+
+    fn set_shared_red_radius(&mut self, radius_pixels: f32) {
+        let vertex = self.points[1];
+        let radius = radius_pixels.clamp(HANDLE_RADIUS + 8.0, MAX_LINE_LEN);
+        let left_angle = vector_angle(vertex, self.points[0]);
+        let right_angle = vector_angle(vertex, self.points[2]);
+        self.points[0] = point_from_polar(vertex, left_angle, radius);
+        self.points[2] = point_from_polar(vertex, right_angle, radius);
+    }
+
+    fn apply_distance_value(&mut self, kind: DistanceKind, metres: f32) {
+        let Some(helper) = self.helper_point else {
+            return;
+        };
+        let scale = self.meters_per_pixel;
+        if scale <= EPSILON {
+            return;
+        }
+
+        match kind {
+            DistanceKind::Base => {
+                let base_pixels = vector_length(self.points[1], helper);
+                if base_pixels > EPSILON {
+                    self.meters_per_pixel = (metres / base_pixels).clamp(0.000_001, 1_000_000.0);
+                }
+            }
+            DistanceKind::LeftRay | DistanceKind::RightRay => {
+                self.set_shared_red_radius(metres / scale);
+            }
+            DistanceKind::Hypotenuse => {
+                let half_angle = self.current_signed_angle().abs() * 0.5;
+                let sine = half_angle.sin().abs();
+                if sine > EPSILON {
+                    self.set_shared_red_radius((metres / scale) / (2.0 * sine));
+                }
+            }
+            DistanceKind::FrontLeft | DistanceKind::FrontRight => {
+                let index = if kind == DistanceKind::FrontLeft { 0 } else { 2 };
+                let vertex = self.points[1];
+                let ray_angle = vector_angle(vertex, self.points[index]);
+                let unit_x = ray_angle.cos();
+                let unit_y = ray_angle.sin();
+                let helper_x = helper.x - vertex.x;
+                let helper_y = helper.y - vertex.y;
+                let projection = helper_x * unit_x + helper_y * unit_y;
+                let helper_sq = helper_x * helper_x + helper_y * helper_y;
+                let target_pixels = metres / scale;
+                let discriminant = target_pixels * target_pixels - helper_sq
+                    + projection * projection;
+                if discriminant >= 0.0 {
+                    let root = discriminant.sqrt();
+                    let current = vector_length(vertex, self.points[index]);
+                    let candidates = [projection + root, projection - root];
+                    let chosen = candidates
+                        .into_iter()
+                        .filter(|value| *value > HANDLE_RADIUS + 8.0)
+                        .min_by(|a, b| {
+                            (*a - current)
+                                .abs()
+                                .partial_cmp(&(*b - current).abs())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    if let Some(radius) = chosen {
+                        self.set_shared_red_radius(radius);
+                    }
+                }
+            }
         }
     }
 
@@ -949,6 +1209,16 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                if self.distance_editor.is_some() {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Enter) => self.commit_distance_edit(),
+                        Key::Named(NamedKey::Escape) => self.cancel_distance_edit(),
+                        Key::Named(NamedKey::Backspace) => self.backspace_distance_input(),
+                        Key::Character(ref text) => self.append_distance_input(text),
+                        _ => {}
+                    }
+                    return;
+                }
                 match event.logical_key {
                     Key::Named(NamedKey::Escape) => {
                         self.save_state();
@@ -974,11 +1244,14 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let Some(window) = &self.window else {
+                let Some(window) = self.window.clone() else {
                     return;
                 };
                 if button == MouseButton::Right && state == ElementState::Pressed {
-                    let hwnd = hwnd_from_window(window);
+                    if self.distance_editor.is_some() {
+                        self.commit_distance_edit();
+                    }
+                    let hwnd = hwnd_from_window(&window);
                     if let Some(command) =
                         unsafe { show_context_menu(hwnd, self.context_menu_state()) }
                     {
@@ -988,7 +1261,8 @@ impl ApplicationHandler for App {
                             | MENU_PLUS_DEGREES
                             | MENU_INVERSION
                             | MENU_HYPOTENUSE
-                            | MENU_FRONT_PLUS => self.toggle_feature(command),
+                            | MENU_FRONT_PLUS
+                            | MENU_DISTANCE_PLUS => self.toggle_feature(command),
                             MENU_MINIMIZE => {
                                 self.save_state();
                                 self.was_minimized = true;
@@ -1009,6 +1283,28 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
+                            if let Some(kind) = self.distance_panel_at(pos) {
+                                let now = Instant::now();
+                                let is_double = self
+                                    .last_distance_click
+                                    .as_ref()
+                                    .map(|(previous, time)| {
+                                        *previous == kind
+                                            && time.elapsed() <= Duration::from_millis(450)
+                                    })
+                                    .unwrap_or(false);
+                                if is_double {
+                                    self.last_distance_click = None;
+                                    self.begin_distance_edit(kind);
+                                } else {
+                                    self.last_distance_click = Some((kind, now));
+                                }
+                                return;
+                            }
+                            if self.distance_editor.is_some() {
+                                self.commit_distance_edit();
+                                return;
+                            }
                             if in_lock_button(pos, self.points) {
                                 self.toggle_angle_lock();
                                 return;
@@ -1034,6 +1330,10 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let wheel_units = Self::wheel_units(delta);
+
+                if self.distance_panel_at(cursor).is_some() {
+                    return;
+                }
 
                 if self.angle_locked && in_lock_button(cursor, self.points) {
                     self.angle_wheel_accumulator = 0.0;
@@ -1135,6 +1435,19 @@ impl App {
                 bounds,
                 helper_overlay_bounds(self.points, helper, self.plus_degrees_visible),
             );
+            if self.distance_visible && self.meters_per_pixel > 0.0 {
+                bounds = merge_bounds(
+                    bounds,
+                    distance_bounds(
+                        self.points,
+                        helper,
+                        self.meters_per_pixel,
+                        self.hypotenuse_visible,
+                        self.front_plus_visible,
+                        self.distance_editor.as_ref(),
+                    ),
+                );
+            }
         }
         let lock = lock_center(self.points);
         let min_x = bounds.min_x.min(lock.x - LOCK_PANEL_SIZE * 0.5);
@@ -1171,6 +1484,19 @@ impl App {
                 bounds,
                 helper_overlay_bounds(self.points, helper, self.plus_degrees_visible),
             );
+            if self.distance_visible && self.meters_per_pixel > 0.0 {
+                bounds = merge_bounds(
+                    bounds,
+                    distance_bounds(
+                        self.points,
+                        helper,
+                        self.meters_per_pixel,
+                        self.hypotenuse_visible,
+                        self.front_plus_visible,
+                        self.distance_editor.as_ref(),
+                    ),
+                );
+            }
         }
         let lock = lock_center(self.points);
         let new_w = (bounds.max_x.max(lock.x + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
