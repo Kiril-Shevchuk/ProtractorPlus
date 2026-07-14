@@ -1,7 +1,7 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tiny_skia::Pixmap;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
@@ -90,7 +90,7 @@ pub unsafe fn show_context_menu(hwnd: HWND) -> Option<u32> {
         hwnd,
         None,
     );
-    let _ = PostMessageW(hwnd, WM_NULL, Default::default(), LPARAM(0));
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     let _ = DestroyMenu(menu);
     if command.0 == 0 { None } else { Some(command.0 as u32) }
 }
