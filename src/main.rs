@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use draw::{content_bounds, Point, HANDLE_RADIUS};
+use draw::{content_bounds, fill_rounded_rect, Point, HANDLE_RADIUS};
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -32,7 +32,9 @@ const CONTENT_PAD: f32 = 42.0;
 const MIN_WINDOW: f32 = 96.0;
 const MAX_LINE_LEN: f32 = 1000.0;
 const LOCK_SIZE: f32 = 22.0;
-const LOCK_GAP: f32 = 16.0;
+const LOCK_PANEL_SIZE: f32 = 31.0;
+const LOCK_PANEL_RADIUS: f32 = 7.0;
+const LOCK_DISTANCE: f32 = 48.0;
 const EPSILON: f32 = 0.0001;
 
 #[derive(Clone, Copy, Debug)]
@@ -131,16 +133,43 @@ fn point_from_polar(vertex: Point, angle: f32, radius: f32) -> Point {
     }
 }
 
-fn lock_center(vertex: Point) -> Point {
+fn angle_bisector_direction(points: [Point; 3]) -> Option<(f32, f32)> {
+    let a = points[0];
+    let vertex = points[1];
+    let b = points[2];
+    let len_a = vector_length(vertex, a);
+    let len_b = vector_length(vertex, b);
+    if len_a < EPSILON || len_b < EPSILON {
+        return None;
+    }
+
+    let ua = ((a.x - vertex.x) / len_a, (a.y - vertex.y) / len_a);
+    let ub = ((b.x - vertex.x) / len_b, (b.y - vertex.y) / len_b);
+    let mut bx = ua.0 + ub.0;
+    let mut by = ua.1 + ub.1;
+    let bisector_len = (bx * bx + by * by).sqrt();
+    if bisector_len < EPSILON {
+        bx = -ua.1;
+        by = ua.0;
+    } else {
+        bx /= bisector_len;
+        by /= bisector_len;
+    }
+    Some((bx, by))
+}
+
+fn lock_center(points: [Point; 3]) -> Point {
+    let vertex = points[1];
+    let (bx, by) = angle_bisector_direction(points).unwrap_or((0.0, 1.0));
     Point {
-        x: vertex.x + HANDLE_RADIUS + LOCK_GAP + LOCK_SIZE * 0.5,
-        y: vertex.y - HANDLE_RADIUS - LOCK_GAP - LOCK_SIZE * 0.5,
+        x: vertex.x - bx * LOCK_DISTANCE,
+        y: vertex.y - by * LOCK_DISTANCE,
     }
 }
 
-fn in_lock_button(point: Point, vertex: Point) -> bool {
-    let center = lock_center(vertex);
-    let half = LOCK_SIZE * 0.75;
+fn in_lock_button(point: Point, points: [Point; 3]) -> bool {
+    let center = lock_center(points);
+    let half = LOCK_PANEL_SIZE * 0.5 + 3.0;
     point.x >= center.x - half
         && point.x <= center.x + half
         && point.y >= center.y - half
@@ -163,28 +192,12 @@ fn stroke_segment(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color
 }
 
 fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3]) {
-    let a = points[0];
     let vertex = points[1];
-    let b = points[2];
-    let len_a = vector_length(vertex, a);
-    let len_b = vector_length(vertex, b);
-    if len_a < EPSILON || len_b < EPSILON {
+    let len_a = vector_length(vertex, points[0]);
+    let len_b = vector_length(vertex, points[2]);
+    let Some((bx, by)) = angle_bisector_direction(points) else {
         return;
-    }
-
-    let ua = ((a.x - vertex.x) / len_a, (a.y - vertex.y) / len_a);
-    let ub = ((b.x - vertex.x) / len_b, (b.y - vertex.y) / len_b);
-    let mut bx = ua.0 + ub.0;
-    let mut by = ua.1 + ub.1;
-    let bisector_len = (bx * bx + by * by).sqrt();
-    if bisector_len < EPSILON {
-        // Для розгорнутого кута вибираємо стабільний перпендикуляр.
-        bx = -ua.1;
-        by = ua.0;
-    } else {
-        bx /= bisector_len;
-        by /= bisector_len;
-    }
+    };
 
     let total = len_a.min(len_b) * 0.88;
     let dash = 6.0;
@@ -210,19 +223,17 @@ fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3]) {
     }
 }
 
-fn draw_lock_icon(pixmap: &mut Pixmap, vertex: Point, locked: bool) {
-    let center = lock_center(vertex);
-    let panel = Rect::from_xywh(
-        center.x - LOCK_SIZE * 0.7,
-        center.y - LOCK_SIZE * 0.7,
-        LOCK_SIZE * 1.4,
-        LOCK_SIZE * 1.4,
+fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool) {
+    let center = lock_center(points);
+    fill_rounded_rect(
+        pixmap,
+        center.x - LOCK_PANEL_SIZE * 0.5,
+        center.y - LOCK_PANEL_SIZE * 0.5,
+        LOCK_PANEL_SIZE,
+        LOCK_PANEL_SIZE,
+        LOCK_PANEL_RADIUS,
+        Color::from_rgba8(255, 255, 255, 155),
     );
-    if let Some(panel) = panel {
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_rgba8(255, 255, 255, 220));
-        pixmap.fill_rect(panel, &paint, Transform::identity(), None);
-    }
 
     let icon_color = if locked {
         Color::from_rgba8(32, 105, 218, 255)
@@ -358,7 +369,7 @@ impl App {
         let height = size.height.max(1);
         let mut pixmap = draw::render_angle_measure(width, height, self.points);
         draw_dashed_bisector(&mut pixmap, self.points);
-        draw_lock_icon(&mut pixmap, self.points[1], self.angle_locked);
+        draw_lock_icon(&mut pixmap, self.points, self.angle_locked);
 
         let pos = window
             .outer_position()
@@ -489,7 +500,7 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
-                            if in_lock_button(pos, self.points[1]) {
+                            if in_lock_button(pos, self.points) {
                                 self.toggle_angle_lock();
                                 return;
                             }
@@ -566,9 +577,9 @@ impl App {
             return;
         };
         let bounds = content_bounds(self.points);
-        let lock = lock_center(self.points[1]);
-        let min_x = bounds.min_x.min(lock.x - LOCK_SIZE);
-        let min_y = bounds.min_y.min(lock.y - LOCK_SIZE);
+        let lock = lock_center(self.points);
+        let min_x = bounds.min_x.min(lock.x - LOCK_PANEL_SIZE * 0.5);
+        let min_y = bounds.min_y.min(lock.y - LOCK_PANEL_SIZE * 0.5);
 
         let mut shift_x = 0.0f32;
         let mut shift_y = 0.0f32;
@@ -592,12 +603,12 @@ impl App {
         }
 
         let bounds = content_bounds(self.points);
-        let lock = lock_center(self.points[1]);
-        let new_w = (bounds.max_x.max(lock.x + LOCK_SIZE) + CONTENT_PAD)
+        let lock = lock_center(self.points);
+        let new_w = (bounds.max_x.max(lock.x + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
             .ceil()
             .max(MIN_WINDOW)
             .min(8192.0) as u32;
-        let new_h = (bounds.max_y.max(lock.y + LOCK_SIZE) + CONTENT_PAD)
+        let new_h = (bounds.max_y.max(lock.y + LOCK_PANEL_SIZE * 0.5) + CONTENT_PAD)
             .ceil()
             .max(MIN_WINDOW)
             .min(8192.0) as u32;
@@ -639,39 +650,36 @@ impl App {
 
         let vertex = self.points[1];
         let moved = clamp_line_length(vertex, target);
-        if !self.angle_locked {
-            self.points[index] = moved;
-            return;
-        }
-
         let moved_radius = vector_length(vertex, moved);
         if moved_radius < EPSILON {
             return;
         }
 
+        if !self.angle_locked {
+            // Обидва промені завжди мають однакову довжину. Кут при цьому
+            // залишається вільним: другий промінь зберігає свій напрямок.
+            let other_index = if index == 0 { 2 } else { 0 };
+            let other_angle = vector_angle(vertex, self.points[other_index]);
+            self.points[index] = moved;
+            self.points[other_index] = point_from_polar(vertex, other_angle, moved_radius);
+            return;
+        }
+
         if index == 0 {
-            let other_radius = vector_length(vertex, self.points[2]);
             let moved_angle = vector_angle(vertex, moved);
             self.points[0] = moved;
-            self.points[2] = clamp_line_length(
+            self.points[2] = point_from_polar(
                 vertex,
-                point_from_polar(
-                    vertex,
-                    moved_angle + self.locked_signed_angle,
-                    other_radius,
-                ),
+                moved_angle + self.locked_signed_angle,
+                moved_radius,
             );
         } else {
-            let other_radius = vector_length(vertex, self.points[0]);
             let moved_angle = vector_angle(vertex, moved);
             self.points[2] = moved;
-            self.points[0] = clamp_line_length(
+            self.points[0] = point_from_polar(
                 vertex,
-                point_from_polar(
-                    vertex,
-                    moved_angle - self.locked_signed_angle,
-                    other_radius,
-                ),
+                moved_angle - self.locked_signed_angle,
+                moved_radius,
             );
         }
     }
