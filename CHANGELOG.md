@@ -1,12 +1,21 @@
 # Changelog
 
-## 2.0.0
+## 2.1.1
 
-- Added a centered startup splash screen using the ProtractorPlus icon.
-- The splash occupies approximately 20% of the primary monitor and remains visible for 1.8 seconds.
-- Added the white Comfortaa signature `Cb prod.` in the lower-right corner of the splash icon.
-- The measuring tool is centered on the primary monitor after every launch.
-- Saved geometry and feature settings remain available, while the previous window position is intentionally ignored at startup.
+- азимут між `North +` і бісектрисою тепер показується в повному діапазоні `0–359°`;
+- відлік ведеться за годинниковою стрілкою: North `0°`, East `90°`, South `180°`, West `270°`;
+- синя дуга тепер може проходити повне коло, а не лише найкоротший сектор `0–180°`;
+- межі вікна враховують довгі дуги азимуту до `359°`.
+
+## 2.1.0
+
+- версію 2.0.0 зі splash-вікном відкинуто; код побудовано на стабільній базі 1.9.1;
+- у контекстне меню додано перемикач `North +` із галочкою активного стану;
+- додано стрілку магнітної півночі, спрямовану вертикально вгору, та позначення `N`;
+- при ввімкненій бісектрисі малюється синя дуга від North до бісектриси;
+- біля дуги показується блок із величиною кута;
+- стрілка адаптується до режиму `Інверсія`;
+- стан `North +` зберігається у файлі налаштувань версії 6.
 
 ## 1.9.1
 

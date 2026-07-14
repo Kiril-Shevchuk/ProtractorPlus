@@ -26,6 +26,7 @@ pub const MENU_INVERSION: u32 = 13;
 pub const MENU_HYPOTENUSE: u32 = 14;
 pub const MENU_FRONT_PLUS: u32 = 15;
 pub const MENU_DISTANCE_PLUS: u32 = 16;
+pub const MENU_NORTH_PLUS: u32 = 17;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
@@ -36,6 +37,7 @@ pub struct ContextMenuState {
     pub hypotenuse: bool,
     pub front_plus: bool,
     pub distance_plus: bool,
+    pub north_plus: bool,
 }
 
 pub fn hwnd_from_window(window: &Window) -> HWND {
@@ -139,6 +141,7 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
         "Дистанція +",
         state.distance_plus,
     );
+    append_toggle_item(menu, MENU_NORTH_PLUS, "North +", state.north_plus);
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
 

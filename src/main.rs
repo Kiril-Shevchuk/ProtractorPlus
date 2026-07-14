@@ -3,7 +3,6 @@
 mod distance;
 mod draw;
 mod icon;
-mod splash;
 mod text;
 mod win32_layered;
 
@@ -26,17 +25,18 @@ use draw::{
 };
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::text::{draw_text, layout_text};
 use crate::win32_layered::{
     configure_overlay, ensure_topmost, hwnd_from_window, is_minimized, minimize_window,
     present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
-    MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_PLUS, MENU_PLUS_DEGREES,
+    MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS, MENU_PLUS_DEGREES,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -52,24 +52,13 @@ const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
 const PLUS_HIT_RADIUS: f32 = 14.0;
-const SPLASH_SCREEN_FRACTION: f32 = 0.20;
-const SPLASH_MIN_SIZE: u32 = 160;
-const SPLASH_MAX_SIZE: u32 = 420;
-const SPLASH_DURATION: Duration = Duration::from_millis(1800);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartupPhase {
-    Splash,
-    Tool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MonitorGeometry {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
+const NORTH_ANGLE: f32 = -PI * 0.5;
+const NORTH_ARROW_LENGTH: f32 = 84.0;
+const NORTH_ARROW_HEAD: f32 = 9.0;
+const NORTH_ARC_MIN_RADIUS: f32 = 38.0;
+const NORTH_ARC_MAX_RADIUS: f32 = 72.0;
+const NORTH_LABEL_OFFSET: f32 = 20.0;
+const NORTH_TEXT_SIZE: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -85,6 +74,7 @@ struct SavedState {
     front_plus_visible: bool,
     distance_visible: bool,
     meters_per_pixel: f32,
+    north_visible: bool,
     window_x: i32,
     window_y: i32,
 }
@@ -144,6 +134,7 @@ fn load_state() -> Option<SavedState> {
             front_plus_visible: false,
             distance_visible: false,
             meters_per_pixel: 0.0,
+            north_visible: false,
             window_x: parse_next(&mut values)?,
             window_y: parse_next(&mut values)?,
         }),
@@ -167,6 +158,7 @@ fn load_state() -> Option<SavedState> {
                 front_plus_visible: false,
                 distance_visible: false,
                 meters_per_pixel: 0.0,
+                north_visible: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -191,6 +183,7 @@ fn load_state() -> Option<SavedState> {
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
                 distance_visible: false,
                 meters_per_pixel: 0.0,
+                north_visible: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -215,6 +208,7 @@ fn load_state() -> Option<SavedState> {
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
+                north_visible: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -246,6 +240,39 @@ fn load_state() -> Option<SavedState> {
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
+                north_visible: false,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        6 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let angle_locked = parse_next::<u8>(&mut values)? != 0;
+            let locked_signed_angle = parse_next(&mut values)?;
+            let red_lock_code: u8 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                }),
+                angle_locked,
+                locked_signed_angle,
+                red_locked_index: match red_lock_code {
+                    1 => Some(0),
+                    2 => Some(2),
+                    _ => None,
+                },
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
+                north_visible: parse_next::<u8>(&mut values)? != 0,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -287,6 +314,21 @@ fn normalize_signed_angle(angle: f32) -> f32 {
         normalized += 2.0 * PI;
     }
     normalized
+}
+
+/// Normalizes an angle to a clockwise screen-space bearing in the range [0, 2π).
+/// In screen coordinates +Y points down, so increasing atan2 angles are clockwise.
+fn normalize_bearing_angle(angle: f32) -> f32 {
+    let full_turn = 2.0 * PI;
+    let mut normalized = angle % full_turn;
+    if normalized < 0.0 {
+        normalized += full_turn;
+    }
+    normalized
+}
+
+fn bearing_degrees(angle: f32) -> i32 {
+    (normalize_bearing_angle(angle).to_degrees().round() as i32).rem_euclid(360)
 }
 
 fn point_from_polar(vertex: Point, angle: f32, radius: f32) -> Point {
@@ -491,6 +533,186 @@ fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3], inverted: bool)
         );
         distance += dash + gap;
     }
+}
+
+
+fn north_arc_geometry(points: [Point; 3]) -> Option<(f32, f32, f32, f32)> {
+    let vertex = points[1];
+    let (bx, by) = angle_bisector_direction(points)?;
+    let bisector_angle = by.atan2(bx);
+    let red_length = vector_length(vertex, points[0])
+        .min(vector_length(vertex, points[2]));
+    let radius = (red_length * 0.32).clamp(NORTH_ARC_MIN_RADIUS, NORTH_ARC_MAX_RADIUS);
+
+    // Magnetic-style bearing: North is 0°, then values grow clockwise
+    // through East 90°, South 180°, West 270° and up to 359°.
+    let sweep = normalize_bearing_angle(bisector_angle - NORTH_ANGLE);
+    let mut mid_angle = NORTH_ANGLE + sweep * 0.5;
+    if sweep < 0.12 {
+        // Keep the 0° label beside the arrow instead of directly on top of it.
+        mid_angle += 0.20;
+    }
+    Some((bisector_angle, sweep, mid_angle, radius))
+}
+
+fn draw_bearing_arc(
+    pixmap: &mut Pixmap,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    clockwise_sweep: f32,
+    width: f32,
+    color: Color,
+) {
+    if radius <= 0.0 || clockwise_sweep <= 0.001 {
+        return;
+    }
+
+    let steps = ((clockwise_sweep * radius) / 8.0).ceil().max(8.0) as usize;
+    let mut builder = PathBuilder::new();
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let angle = start_angle + clockwise_sweep * t;
+        let point = point_from_polar(center, angle, radius);
+        if step == 0 {
+            builder.move_to(point.x, point.y);
+        } else {
+            builder.line_to(point.x, point.y);
+        }
+    }
+
+    if let Some(path) = builder.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &Stroke {
+                width,
+                ..Stroke::default()
+            },
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+fn north_arrow_tip(vertex: Point) -> Point {
+    point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH)
+}
+
+fn draw_centered_text(
+    pixmap: &mut Pixmap,
+    text: &str,
+    center: Point,
+    size: f32,
+    color: Color,
+) {
+    let layout = layout_text(text, size);
+    let text_x = center.x - (layout.xmin + layout.xmax) * 0.5;
+    let baseline = center.y + (layout.ymin + layout.ymax) * 0.5;
+    draw_text(pixmap, text, text_x, baseline, size, color);
+}
+
+fn draw_north_overlay(
+    pixmap: &mut Pixmap,
+    points: [Point; 3],
+    bisector_visible: bool,
+    inverted: bool,
+) {
+    let vertex = points[1];
+    let line_color = foreground_line_color(inverted);
+    let arrow_tip = north_arrow_tip(vertex);
+    let arrow_start = point_from_polar(vertex, NORTH_ANGLE, HANDLE_RADIUS + 4.0);
+
+    stroke_segment(pixmap, arrow_start, arrow_tip, 1.55, line_color);
+
+    // Conventional magnetic-north arrowhead.
+    let left = point_from_polar(
+        arrow_tip,
+        NORTH_ANGLE + PI - 0.48,
+        NORTH_ARROW_HEAD,
+    );
+    let right = point_from_polar(
+        arrow_tip,
+        NORTH_ANGLE + PI + 0.48,
+        NORTH_ARROW_HEAD,
+    );
+    stroke_segment(pixmap, arrow_tip, left, 1.55, line_color);
+    stroke_segment(pixmap, arrow_tip, right, 1.55, line_color);
+
+    let n_center = point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH + 15.0);
+    draw_centered_text(
+        pixmap,
+        "N",
+        n_center,
+        NORTH_TEXT_SIZE,
+        line_color,
+    );
+
+    if !bisector_visible {
+        return;
+    }
+
+    let Some((_bisector_angle, sweep, mid_angle, radius)) = north_arc_geometry(points) else {
+        return;
+    };
+    let arc_color = Color::from_rgba8(54, 123, 235, 242);
+    draw_bearing_arc(
+        pixmap,
+        vertex,
+        radius,
+        NORTH_ANGLE,
+        sweep,
+        1.65,
+        arc_color,
+    );
+
+    let angle_text = format!("{}°", bearing_degrees(sweep));
+    let label_center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+    draw_text_panel(
+        pixmap,
+        &angle_text,
+        label_center.x,
+        label_center.y,
+        Color::from_rgba8(218, 233, 255, 188),
+        Color::from_rgba8(28, 87, 190, 252),
+    );
+}
+
+fn north_overlay_bounds(points: [Point; 3], bisector_visible: bool) -> ContentBounds {
+    let vertex = points[1];
+    let arrow_tip = north_arrow_tip(vertex);
+    let n_center = point_from_polar(vertex, NORTH_ANGLE, NORTH_ARROW_LENGTH + 15.0);
+    let mut bounds = ContentBounds {
+        min_x: vertex.x.min(arrow_tip.x).min(n_center.x) - 18.0,
+        min_y: vertex.y.min(arrow_tip.y).min(n_center.y) - 18.0,
+        max_x: vertex.x.max(arrow_tip.x).max(n_center.x) + 18.0,
+        max_y: vertex.y.max(arrow_tip.y).max(n_center.y) + 18.0,
+    };
+
+    if bisector_visible {
+        if let Some((_bisector_angle, sweep, mid_angle, radius)) = north_arc_geometry(points) {
+            include_bearing_arc_in_bounds(
+                &mut bounds,
+                vertex,
+                radius,
+                NORTH_ANGLE,
+                sweep,
+            );
+            let angle_text = format!("{}°", bearing_degrees(sweep));
+            let label_center =
+                point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+            let panel = text_panel_rect(&angle_text, label_center.x, label_center.y);
+            bounds.min_x = bounds.min_x.min(panel.x);
+            bounds.min_y = bounds.min_y.min(panel.y);
+            bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+            bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+        }
+    }
+
+    bounds
 }
 
 fn draw_lock_at(
@@ -790,6 +1012,24 @@ fn include_arc_in_bounds(
     }
 }
 
+fn include_bearing_arc_in_bounds(
+    bounds: &mut ContentBounds,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    clockwise_sweep: f32,
+) {
+    let steps = ((clockwise_sweep / (PI / 24.0)).ceil() as usize).max(1);
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        include_point_in_bounds(
+            bounds,
+            point_from_polar(center, start_angle + clockwise_sweep * t, radius),
+            4.0,
+        );
+    }
+}
+
 fn helper_overlay_bounds(
     points: [Point; 3],
     helper: Point,
@@ -1027,14 +1267,12 @@ struct App {
     front_plus_visible: bool,
     distance_visible: bool,
     meters_per_pixel: f32,
+    north_visible: bool,
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
     last_red_click: Option<(usize, Instant)>,
-    startup_phase: StartupPhase,
-    splash_deadline: Option<Instant>,
-    startup_monitor: Option<MonitorGeometry>,
-    center_after_resize: bool,
+    restored_window_pos: Option<(i32, i32)>,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
 }
@@ -1069,72 +1307,15 @@ impl App {
             meters_per_pixel: saved
                 .map(|state| state.meters_per_pixel)
                 .unwrap_or(0.0),
+            north_visible: saved.map(|state| state.north_visible).unwrap_or(false),
             distance_editor: None,
             last_distance_click: None,
             last_plus_click: None,
             last_red_click: None,
-            startup_phase: StartupPhase::Splash,
-            splash_deadline: None,
-            startup_monitor: None,
-            center_after_resize: false,
+            restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
         }
-    }
-
-    fn detect_startup_monitor(event_loop: &ActiveEventLoop) -> MonitorGeometry {
-        let monitor = event_loop
-            .primary_monitor()
-            .or_else(|| event_loop.available_monitors().next());
-
-        if let Some(monitor) = monitor {
-            let position = monitor.position();
-            let size = monitor.size();
-            MonitorGeometry {
-                x: position.x,
-                y: position.y,
-                width: size.width.max(1),
-                height: size.height.max(1),
-            }
-        } else {
-            MonitorGeometry {
-                x: 0,
-                y: 0,
-                width: 1920,
-                height: 1080,
-            }
-        }
-    }
-
-    fn splash_size(monitor: MonitorGeometry) -> u32 {
-        ((monitor.width.min(monitor.height) as f32 * SPLASH_SCREEN_FRACTION).round() as u32)
-            .clamp(SPLASH_MIN_SIZE, SPLASH_MAX_SIZE)
-    }
-
-    fn center_window_on_startup_monitor(&self) {
-        let (Some(window), Some(monitor)) = (&self.window, self.startup_monitor) else {
-            return;
-        };
-        let size = window.inner_size();
-        let x = monitor.x + (monitor.width as i64 - size.width as i64).max(0) as i32 / 2;
-        let y = monitor.y + (monitor.height as i64 - size.height as i64).max(0) as i32 / 2;
-        window.set_outer_position(PhysicalPosition::new(x, y));
-    }
-
-    fn finish_splash(&mut self) {
-        if self.startup_phase != StartupPhase::Splash {
-            return;
-        }
-
-        self.startup_phase = StartupPhase::Tool;
-        self.splash_deadline = None;
-        if let Some(window) = &self.window {
-            window.set_resizable(true);
-        }
-        self.center_after_resize = true;
-        self.fit_window_to_content();
-        self.center_window_on_startup_monitor();
-        self.request_redraw();
     }
 
     fn current_signed_angle(&self) -> f32 {
@@ -1302,6 +1483,7 @@ impl App {
                 self.toggle_distance_mode();
                 return;
             }
+            MENU_NORTH_PLUS => self.north_visible = !self.north_visible,
             _ => return,
         }
         self.fit_window_to_content();
@@ -1318,6 +1500,7 @@ impl App {
             hypotenuse: self.hypotenuse_visible,
             front_plus: self.front_plus_visible,
             distance_plus: self.distance_visible,
+            north_plus: self.north_visible,
         }
     }
 
@@ -1337,7 +1520,7 @@ impl App {
             _ => 0u8,
         };
         let text = format!(
-            "5\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
+            "6\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
@@ -1357,6 +1540,7 @@ impl App {
             u8::from(self.front_plus_visible),
             u8::from(self.distance_visible),
             self.meters_per_pixel,
+            u8::from(self.north_visible),
             window_x,
             window_y,
         );
@@ -1379,18 +1563,6 @@ impl App {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
-
-        if self.startup_phase == StartupPhase::Splash {
-            let pixmap = splash::render_splash(width, height);
-            let pos = window
-                .outer_position()
-                .unwrap_or(PhysicalPosition::new(0, 0));
-            unsafe {
-                present_pixmap(hwnd, &pixmap, pos.x, pos.y);
-            }
-            return;
-        }
-
         let mut pixmap = draw::render_angle_measure(width, height, self.points, self.inverted);
 
         if self.hypotenuse_visible {
@@ -1403,6 +1575,14 @@ impl App {
         }
         if self.bisector_visible {
             draw_dashed_bisector(&mut pixmap, self.points, self.inverted);
+        }
+        if self.north_visible {
+            draw_north_overlay(
+                &mut pixmap,
+                self.points,
+                self.bisector_visible,
+                self.inverted,
+            );
         }
         if let Some(helper) = self.helper_point {
             draw_helper_overlay(
@@ -1689,39 +1869,29 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-
-        let monitor = Self::detect_startup_monitor(event_loop);
-        let splash_size = Self::splash_size(monitor);
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title("ProtractorPlus")
-                        .with_inner_size(PhysicalSize::new(splash_size, splash_size))
+                        .with_inner_size(LogicalSize::new(640.0, 420.0))
                         .with_transparent(true)
                         .with_decorations(false)
-                        .with_resizable(false)
+                        .with_resizable(true)
                         .with_window_icon(Some(icon::window_icon())),
                 )
                 .expect("create window"),
         );
-
-        self.startup_monitor = Some(monitor);
-        self.splash_deadline = Some(Instant::now() + SPLASH_DURATION);
-        self.window = Some(window);
-        self.center_window_on_startup_monitor();
-
-        if let Some(window) = &self.window {
-            let hwnd = hwnd_from_window(window);
-            unsafe {
-                configure_overlay(hwnd);
-            }
-            window.request_redraw();
+        if let Some((x, y)) = self.restored_window_pos.take() {
+            window.set_outer_position(PhysicalPosition::new(x, y));
         }
-
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.splash_deadline.expect("splash deadline"),
-        ));
+        let hwnd = hwnd_from_window(&window);
+        unsafe {
+            configure_overlay(hwnd);
+        }
+        self.window = Some(window);
+        self.fit_window_to_content();
+        self.redraw();
     }
 
     fn window_event(
@@ -1730,22 +1900,6 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.startup_phase == StartupPhase::Splash {
-            match event {
-                WindowEvent::CloseRequested => event_loop.exit(),
-                WindowEvent::RedrawRequested => self.redraw(),
-                WindowEvent::Resized(_) | WindowEvent::Moved(_) => self.request_redraw(),
-                WindowEvent::KeyboardInput { event, .. }
-                    if event.state == ElementState::Pressed
-                        && event.logical_key == Key::Named(NamedKey::Escape) =>
-                {
-                    event_loop.exit();
-                }
-                _ => {}
-            }
-            return;
-        }
-
         match event {
             WindowEvent::CloseRequested => {
                 self.save_state();
@@ -1766,19 +1920,7 @@ impl ApplicationHandler for App {
                     self.was_minimized = minimized;
                 }
             }
-            WindowEvent::Resized(_) => {
-                if self.center_after_resize {
-                    self.center_window_on_startup_monitor();
-                    self.center_after_resize = false;
-                }
-                if let Some(window) = &self.window {
-                    let hwnd = hwnd_from_window(window);
-                    if !unsafe { is_minimized(hwnd) } {
-                        window.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::Moved(_) => {
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
                 if let Some(window) = &self.window {
                     let hwnd = hwnd_from_window(window);
                     if !unsafe { is_minimized(hwnd) } {
@@ -1843,7 +1985,8 @@ impl ApplicationHandler for App {
                             | MENU_INVERSION
                             | MENU_HYPOTENUSE
                             | MENU_FRONT_PLUS
-                            | MENU_DISTANCE_PLUS => self.toggle_feature(command),
+                            | MENU_DISTANCE_PLUS
+                            | MENU_NORTH_PLUS => self.toggle_feature(command),
                             MENU_MINIMIZE => {
                                 self.save_state();
                                 self.was_minimized = true;
@@ -2055,21 +2198,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.startup_phase == StartupPhase::Splash {
-            let deadline = self
-                .splash_deadline
-                .unwrap_or_else(|| Instant::now() + SPLASH_DURATION);
-            if Instant::now() >= deadline {
-                self.finish_splash();
-                event_loop.set_control_flow(ControlFlow::Wait);
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            }
-            return;
-        }
-
-        event_loop.set_control_flow(ControlFlow::Wait);
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         let Some(window) = &self.window else {
             return;
         };
@@ -2113,6 +2242,12 @@ impl App {
             return;
         };
         let mut bounds = content_bounds(self.points);
+        if self.north_visible {
+            bounds = merge_bounds(
+                bounds,
+                north_overlay_bounds(self.points, self.bisector_visible),
+            );
+        }
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
                 bounds,
@@ -2170,6 +2305,12 @@ impl App {
         }
 
         let mut bounds = content_bounds(self.points);
+        if self.north_visible {
+            bounds = merge_bounds(
+                bounds,
+                north_overlay_bounds(self.points, self.bisector_visible),
+            );
+        }
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
                 bounds,
