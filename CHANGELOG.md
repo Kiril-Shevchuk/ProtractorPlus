@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1
+
+- rendered the Comfortaa degree label internally at 4x resolution;
+- downsampled glyph coverage for smoother edges at the final display size;
+- corrected alpha compositing so anti-aliased text blends cleanly with the semi-transparent panel;
+- optimized the loaded font outlines for the supersampled raster size.
+
 ## 1.3.0
 
 - embedded the Comfortaa variable font for the degree label;
