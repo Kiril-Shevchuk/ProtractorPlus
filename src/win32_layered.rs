@@ -19,19 +19,21 @@ use winit::window::Window;
 
 pub const MENU_MINIMIZE: u32 = 1;
 pub const MENU_CLOSE: u32 = 2;
-pub const MENU_BISECTOR: u32 = 10;
-pub const MENU_PLUS: u32 = 11;
-pub const MENU_PLUS_DEGREES: u32 = 12;
-pub const MENU_INVERSION: u32 = 13;
-pub const MENU_HYPOTENUSE: u32 = 14;
-pub const MENU_FRONT_PLUS: u32 = 15;
-pub const MENU_DISTANCE_PLUS: u32 = 16;
-pub const MENU_NORTH_PLUS: u32 = 17;
+pub const MENU_INVERSION: u32 = 10;
+pub const MENU_NORTH_PLUS: u32 = 11;
+pub const MENU_BISECTOR: u32 = 12;
+pub const MENU_HYPOTENUSE: u32 = 13;
+pub const MENU_PLUS: u32 = 14;
+pub const MENU_COURSE_PLUS: u32 = 15;
+pub const MENU_PLUS_DEGREES: u32 = 16;
+pub const MENU_FRONT_PLUS: u32 = 17;
+pub const MENU_DISTANCE_PLUS: u32 = 18;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
     pub bisector: bool,
     pub plus: bool,
+    pub course_plus: bool,
     pub plus_degrees: bool,
     pub inversion: bool,
     pub hypotenuse: bool,
@@ -119,29 +121,15 @@ unsafe fn append_toggle_item(
 pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u32> {
     let menu: HMENU = CreatePopupMenu().ok()?;
 
-    append_toggle_item(menu, MENU_BISECTOR, "Бісектриса", state.bisector);
-    append_toggle_item(menu, MENU_PLUS, "Плюс", state.plus);
-    append_toggle_item(
-        menu,
-        MENU_PLUS_DEGREES,
-        "Градуси +",
-        state.plus_degrees,
-    );
     append_toggle_item(menu, MENU_INVERSION, "Інверсія", state.inversion);
-    append_toggle_item(
-        menu,
-        MENU_HYPOTENUSE,
-        "Гіпотенуза",
-        state.hypotenuse,
-    );
-    append_toggle_item(menu, MENU_FRONT_PLUS, "Фронт +", state.front_plus);
-    append_toggle_item(
-        menu,
-        MENU_DISTANCE_PLUS,
-        "Дистанція +",
-        state.distance_plus,
-    );
     append_toggle_item(menu, MENU_NORTH_PLUS, "North +", state.north_plus);
+    append_toggle_item(menu, MENU_BISECTOR, "Бісектриса", state.bisector);
+    append_toggle_item(menu, MENU_HYPOTENUSE, "Гіпотенуза", state.hypotenuse);
+    append_toggle_item(menu, MENU_PLUS, "Плюс +", state.plus);
+    append_toggle_item(menu, MENU_COURSE_PLUS, "Курс +", state.course_plus);
+    append_toggle_item(menu, MENU_PLUS_DEGREES, "Градуси +", state.plus_degrees);
+    append_toggle_item(menu, MENU_FRONT_PLUS, "Фронт +", state.front_plus);
+    append_toggle_item(menu, MENU_DISTANCE_PLUS, "Дистанція +", state.distance_plus);
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
 

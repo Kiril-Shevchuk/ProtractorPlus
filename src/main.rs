@@ -36,7 +36,8 @@ use crate::win32_layered::{
     configure_overlay, ensure_topmost, hwnd_from_window, is_minimized, minimize_window,
     present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
-    MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS, MENU_PLUS_DEGREES,
+    MENU_COURSE_PLUS, MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS,
+    MENU_PLUS_DEGREES,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -62,6 +63,9 @@ const NORTH_TEXT_SIZE: f32 = 16.0;
 const NORTH_HANDLE_INDEX: usize = 4;
 const NORTH_HANDLE_HIT_RADIUS: f32 = 15.0;
 const NORTH_LOCK_GAP: f32 = 5.0;
+const COURSE_ARC_MIN_RADIUS: f32 = 24.0;
+const COURSE_ARC_MAX_RADIUS: f32 = 50.0;
+const COURSE_LABEL_OFFSET: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -80,6 +84,7 @@ struct SavedState {
     north_visible: bool,
     north_angle: f32,
     north_locked: bool,
+    course_visible: bool,
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
@@ -145,6 +150,7 @@ fn load_state() -> Option<SavedState> {
             north_visible: false,
             north_angle: NORTH_DEFAULT_ANGLE,
             north_locked: false,
+            course_visible: false,
             blue_pinned: false,
             left_red_pinned: false,
             right_red_pinned: false,
@@ -174,6 +180,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -204,6 +211,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -234,6 +242,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -271,6 +280,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -308,6 +318,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: parse_next::<u8>(&mut values)? != 0,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -345,6 +356,7 @@ fn load_state() -> Option<SavedState> {
                 north_visible: parse_next::<u8>(&mut values)? != 0,
                 north_angle: parse_next(&mut values)?,
                 north_locked: parse_next::<u8>(&mut values)? != 0,
+                course_visible: false,
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
@@ -382,6 +394,42 @@ fn load_state() -> Option<SavedState> {
                 north_visible: parse_next::<u8>(&mut values)? != 0,
                 north_angle: parse_next(&mut values)?,
                 north_locked: parse_next::<u8>(&mut values)? != 0,
+                course_visible: false,
+                blue_pinned: parse_next::<u8>(&mut values)? != 0,
+                left_red_pinned: parse_next::<u8>(&mut values)? != 0,
+                right_red_pinned: parse_next::<u8>(&mut values)? != 0,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        9 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let angle_locked = parse_next::<u8>(&mut values)? != 0;
+            let locked_signed_angle = parse_next(&mut values)?;
+            let red_lock_code: u8 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point { x: helper_x, y: helper_y }),
+                angle_locked,
+                locked_signed_angle,
+                red_locked_index: match red_lock_code {
+                    1 => Some(0),
+                    2 => Some(2),
+                    _ => None,
+                },
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
+                north_visible: parse_next::<u8>(&mut values)? != 0,
+                north_angle: parse_next(&mut values)?,
+                north_locked: parse_next::<u8>(&mut values)? != 0,
+                course_visible: parse_next::<u8>(&mut values)? != 0,
                 blue_pinned: parse_next::<u8>(&mut values)? != 0,
                 left_red_pinned: parse_next::<u8>(&mut values)? != 0,
                 right_red_pinned: parse_next::<u8>(&mut values)? != 0,
@@ -900,6 +948,76 @@ fn north_overlay_bounds(
     bounds
 }
 
+fn course_arc_geometry(vertex: Point, helper: Point, north_angle: f32) -> Option<(f32, f32, f32)> {
+    let helper_length = vector_length(vertex, helper);
+    if helper_length < EPSILON {
+        return None;
+    }
+    let helper_angle = vector_angle(vertex, helper);
+    let sweep = normalize_bearing_angle(helper_angle - north_angle);
+    let mut mid_angle = north_angle + sweep * 0.5;
+    if sweep < 0.12 {
+        mid_angle += 0.20;
+    }
+    let radius = (helper_length * 0.30).clamp(COURSE_ARC_MIN_RADIUS, COURSE_ARC_MAX_RADIUS);
+    Some((sweep, mid_angle, radius))
+}
+
+fn course_angle_label_rect(vertex: Point, helper: Point, north_angle: f32) -> Option<PanelRect> {
+    let (sweep, mid_angle, radius) = course_arc_geometry(vertex, helper, north_angle)?;
+    let angle_text = format!("{}°", bearing_degrees(sweep));
+    let center = point_from_polar(vertex, mid_angle, radius + COURSE_LABEL_OFFSET);
+    Some(text_panel_rect(&angle_text, center.x, center.y))
+}
+
+fn in_course_angle_label(point: Point, vertex: Point, helper: Point, north_angle: f32) -> bool {
+    let Some(panel) = course_angle_label_rect(vertex, helper, north_angle) else {
+        return false;
+    };
+    point.x >= panel.x
+        && point.x <= panel.x + panel.width
+        && point.y >= panel.y
+        && point.y <= panel.y + panel.height
+}
+
+fn draw_course_overlay(pixmap: &mut Pixmap, vertex: Point, helper: Point, north_angle: f32) {
+    let Some((sweep, mid_angle, radius)) = course_arc_geometry(vertex, helper, north_angle) else {
+        return;
+    };
+    let arc_color = Color::from_rgba8(48, 205, 88, 235);
+    draw_bearing_arc(pixmap, vertex, radius, north_angle, sweep, 1.65, arc_color);
+    let angle_text = format!("{}°", bearing_degrees(sweep));
+    let label_center = point_from_polar(vertex, mid_angle, radius + COURSE_LABEL_OFFSET);
+    draw_text_panel(
+        pixmap,
+        &angle_text,
+        label_center.x,
+        label_center.y,
+        Color::from_rgba8(225, 255, 225, 188),
+        Color::from_rgba8(22, 132, 42, 252),
+    );
+}
+
+fn course_overlay_bounds(vertex: Point, helper: Point, north_angle: f32) -> ContentBounds {
+    let mut bounds = ContentBounds {
+        min_x: vertex.x.min(helper.x) - 20.0,
+        min_y: vertex.y.min(helper.y) - 20.0,
+        max_x: vertex.x.max(helper.x) + 20.0,
+        max_y: vertex.y.max(helper.y) + 20.0,
+    };
+    if let Some((sweep, mid_angle, radius)) = course_arc_geometry(vertex, helper, north_angle) {
+        include_bearing_arc_in_bounds(&mut bounds, vertex, radius, north_angle, sweep);
+        let angle_text = format!("{}°", bearing_degrees(sweep));
+        let label_center = point_from_polar(vertex, mid_angle, radius + COURSE_LABEL_OFFSET);
+        let panel = text_panel_rect(&angle_text, label_center.x, label_center.y);
+        bounds.min_x = bounds.min_x.min(panel.x);
+        bounds.min_y = bounds.min_y.min(panel.y);
+        bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+        bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+    }
+    bounds
+}
+
 fn draw_lock_at(
     pixmap: &mut Pixmap,
     center: Point,
@@ -1142,6 +1260,8 @@ fn helper_hypotenuse_intersection(points: [Point; 3], helper: Point) -> Option<(
 
 #[derive(Clone, Copy, Debug)]
 struct OutsideAngleInfo {
+    boundary_angle: f32,
+    helper_angle: f32,
     mid_angle: f32,
     delta_radians: f32,
 }
@@ -1174,6 +1294,8 @@ fn helper_outside_angle(points: [Point; 3], helper: Point) -> Option<OutsideAngl
     let helper_delta = normalize_signed_angle(angle_h - boundary_angle);
 
     Some(OutsideAngleInfo {
+        boundary_angle,
+        helper_angle: angle_h,
         mid_angle: boundary_angle + helper_delta * 0.5,
         delta_radians,
     })
@@ -1253,8 +1375,19 @@ fn helper_overlay_bounds(
 
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
-    include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
-    include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
+    let outside = helper_outside_angle(points, helper);
+    if plus_degrees_visible {
+        include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
+        include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
+    } else if let Some(outside) = outside {
+        include_arc_in_bounds(
+            &mut bounds,
+            vertex,
+            radius,
+            outside.boundary_angle,
+            outside.helper_angle,
+        );
+    }
 
     if let Some((intersection, t)) = helper_hypotenuse_intersection(points, helper) {
         include_point_in_bounds(&mut bounds, intersection, 5.0);
@@ -1289,7 +1422,7 @@ fn helper_overlay_bounds(
         }
     }
 
-    if let Some(outside) = helper_outside_angle(points, helper) {
+    if let Some(outside) = outside {
         let delta_text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
         let delta_center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
         let panel = text_panel_rect(&delta_text, delta_center.x, delta_center.y);
@@ -1368,13 +1501,27 @@ fn draw_helper_overlay(
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
     let outside = helper_outside_angle(points, helper);
-    let arc_color = if outside.is_some() {
-        Color::from_rgba8(235, 62, 62, 235)
-    } else {
-        Color::from_rgba8(48, 205, 88, 230)
-    };
-    draw_arc(pixmap, vertex, radius, angle_a, angle_h, 1.5, arc_color);
-    draw_arc(pixmap, vertex, radius, angle_h, angle_b, 1.5, arc_color);
+    if plus_degrees_visible {
+        let arc_color = if outside.is_some() {
+            Color::from_rgba8(235, 62, 62, 235)
+        } else {
+            Color::from_rgba8(48, 205, 88, 230)
+        };
+        draw_arc(pixmap, vertex, radius, angle_a, angle_h, 1.5, arc_color);
+        draw_arc(pixmap, vertex, radius, angle_h, angle_b, 1.5, arc_color);
+    } else if let Some(outside) = outside {
+        // When “Градуси +” is off, ordinary green helper arcs are hidden.
+        // Only the red angular overrun and its delta label remain.
+        draw_arc(
+            pixmap,
+            vertex,
+            radius,
+            outside.boundary_angle,
+            outside.helper_angle,
+            1.5,
+            Color::from_rgba8(235, 62, 62, 235),
+        );
+    }
 
     if plus_degrees_visible {
         let text1 = format!("{}°", angle_between(points[0], vertex, helper).round() as i32);
@@ -1478,6 +1625,7 @@ struct App {
     north_visible: bool,
     north_angle: f32,
     north_locked: bool,
+    course_visible: bool,
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
@@ -1488,6 +1636,7 @@ struct App {
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
     north_wheel_accumulator: f32,
+    course_wheel_accumulator: f32,
 }
 
 impl App {
@@ -1523,6 +1672,7 @@ impl App {
             north_visible: saved.map(|state| state.north_visible).unwrap_or(false),
             north_angle: saved.map(|state| state.north_angle).unwrap_or(NORTH_DEFAULT_ANGLE),
             north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
+            course_visible: saved.map(|state| state.course_visible).unwrap_or(false),
             blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
             left_red_pinned: saved.map(|state| state.left_red_pinned).unwrap_or(false),
             right_red_pinned: saved.map(|state| state.right_red_pinned).unwrap_or(false),
@@ -1533,7 +1683,14 @@ impl App {
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
             north_wheel_accumulator: 0.0,
+            course_wheel_accumulator: 0.0,
         };
+        if app.course_visible {
+            app.north_visible = true;
+            if app.helper_point.is_none() {
+                app.helper_point = Some(app.default_helper_point());
+            }
+        }
         app.rebase_geometry_for_startup();
         app
     }
@@ -1742,10 +1899,20 @@ impl App {
         }
     }
 
+    fn rotate_helper_about_vertex_by_degrees(&mut self, delta_degrees: f32) {
+        let Some(helper) = self.helper_point else { return; };
+        let vertex = self.points[1];
+        let radius = vector_length(vertex, helper);
+        if radius < EPSILON { return; }
+        let angle = vector_angle(vertex, helper) + delta_degrees.to_radians();
+        self.helper_point = Some(point_from_polar(vertex, angle, radius));
+    }
+
     fn toggle_helper_point(&mut self) {
         self.helper_point = if self.helper_point.is_some() {
             self.distance_visible = false;
             self.distance_editor = None;
+            self.course_visible = false;
             None
         } else {
             Some(self.default_helper_point())
@@ -1784,6 +1951,15 @@ impl App {
                 self.toggle_helper_point();
                 return;
             }
+            MENU_COURSE_PLUS => {
+                self.course_visible = !self.course_visible;
+                if self.course_visible {
+                    if self.helper_point.is_none() {
+                        self.helper_point = Some(self.default_helper_point());
+                    }
+                    self.north_visible = true;
+                }
+            }
             MENU_PLUS_DEGREES => self.plus_degrees_visible = !self.plus_degrees_visible,
             MENU_INVERSION => self.inverted = !self.inverted,
             MENU_HYPOTENUSE => self.hypotenuse_visible = !self.hypotenuse_visible,
@@ -1792,7 +1968,12 @@ impl App {
                 self.toggle_distance_mode();
                 return;
             }
-            MENU_NORTH_PLUS => self.north_visible = !self.north_visible,
+            MENU_NORTH_PLUS => {
+                self.north_visible = !self.north_visible;
+                if !self.north_visible {
+                    self.course_visible = false;
+                }
+            }
             _ => return,
         }
         self.fit_window_to_content();
@@ -1804,6 +1985,7 @@ impl App {
         ContextMenuState {
             bisector: self.bisector_visible,
             plus: self.helper_point.is_some(),
+            course_plus: self.course_visible,
             plus_degrees: self.plus_degrees_visible,
             inversion: self.inverted,
             hypotenuse: self.hypotenuse_visible,
@@ -1828,36 +2010,33 @@ impl App {
             Some(2) => 2u8,
             _ => 0u8,
         };
-        let text = format!(
-            "8\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
-            p[0].x,
-            p[0].y,
-            p[1].x,
-            p[1].y,
-            p[2].x,
-            p[2].y,
-            helper_enabled,
-            helper.x,
-            helper.y,
-            u8::from(self.angle_locked),
-            self.locked_signed_angle,
-            red_lock_code,
-            u8::from(self.bisector_visible),
-            u8::from(self.plus_degrees_visible),
-            u8::from(self.inverted),
-            u8::from(self.hypotenuse_visible),
-            u8::from(self.front_plus_visible),
-            u8::from(self.distance_visible),
-            self.meters_per_pixel,
-            u8::from(self.north_visible),
-            self.north_angle,
-            u8::from(self.north_locked),
-            u8::from(self.blue_pinned),
-            u8::from(self.left_red_pinned),
-            u8::from(self.right_red_pinned),
-            window_x,
-            window_y,
-        );
+        let lines = [
+            "9".to_string(),
+            format!("{} {}", p[0].x, p[0].y),
+            format!("{} {}", p[1].x, p[1].y),
+            format!("{} {}", p[2].x, p[2].y),
+            helper_enabled.to_string(),
+            format!("{} {}", helper.x, helper.y),
+            u8::from(self.angle_locked).to_string(),
+            self.locked_signed_angle.to_string(),
+            red_lock_code.to_string(),
+            u8::from(self.bisector_visible).to_string(),
+            u8::from(self.plus_degrees_visible).to_string(),
+            u8::from(self.inverted).to_string(),
+            u8::from(self.hypotenuse_visible).to_string(),
+            u8::from(self.front_plus_visible).to_string(),
+            u8::from(self.distance_visible).to_string(),
+            self.meters_per_pixel.to_string(),
+            u8::from(self.north_visible).to_string(),
+            self.north_angle.to_string(),
+            u8::from(self.north_locked).to_string(),
+            u8::from(self.course_visible).to_string(),
+            u8::from(self.blue_pinned).to_string(),
+            u8::from(self.left_red_pinned).to_string(),
+            u8::from(self.right_red_pinned).to_string(),
+            format!("{} {}", window_x, window_y),
+        ];
+        let text = format!("{}\n", lines.join("\n"));
         let path = settings_path();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -1899,6 +2078,13 @@ impl App {
                 self.north_angle,
                 self.north_locked,
             );
+        }
+        if self.course_visible {
+            if let Some(helper) = self.helper_point {
+                if self.north_visible {
+                    draw_course_overlay(&mut pixmap, self.points[1], helper, self.north_angle);
+                }
+            }
         }
         if let Some(helper) = self.helper_point {
             draw_helper_overlay(
@@ -2326,6 +2512,7 @@ impl ApplicationHandler for App {
                         match command {
                             MENU_BISECTOR
                             | MENU_PLUS
+                            | MENU_COURSE_PLUS
                             | MENU_PLUS_DEGREES
                             | MENU_INVERSION
                             | MENU_HYPOTENUSE
@@ -2480,12 +2667,34 @@ impl ApplicationHandler for App {
                 };
                 let wheel_units = Self::wheel_units(delta);
 
+                if self.course_visible
+                    && self.north_visible
+                    && self.helper_point.is_some()
+                    && in_course_angle_label(cursor, self.points[1], self.helper_point.unwrap(), self.north_angle)
+                {
+                    self.angle_wheel_accumulator = 0.0;
+                    self.rotation_wheel_accumulator = 0.0;
+                    self.north_wheel_accumulator = 0.0;
+                    self.course_wheel_accumulator += wheel_units;
+                    let whole_steps = self.course_wheel_accumulator.trunc() as i32;
+                    if whole_steps != 0 {
+                        self.course_wheel_accumulator -= whole_steps as f32;
+                        // Wheel up increases the displayed clockwise course bearing.
+                        self.rotate_helper_about_vertex_by_degrees(whole_steps as f32);
+                        self.fit_window_to_content();
+                        self.save_state();
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
                 if self.north_visible
                     && self.bisector_visible
                     && in_north_angle_label(cursor, self.points, self.north_angle)
                 {
                     self.angle_wheel_accumulator = 0.0;
                     self.rotation_wheel_accumulator = 0.0;
+                    self.course_wheel_accumulator = 0.0;
                     if self.north_locked {
                         self.north_wheel_accumulator = 0.0;
                         return;
@@ -2583,6 +2792,7 @@ impl ApplicationHandler for App {
                 self.angle_wheel_accumulator = 0.0;
                 self.rotation_wheel_accumulator = 0.0;
                 self.north_wheel_accumulator = 0.0;
+                self.course_wheel_accumulator = 0.0;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some(Point {
@@ -2656,6 +2866,16 @@ impl App {
                 north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
             );
         }
+        if self.course_visible {
+            if let Some(helper) = self.helper_point {
+                if self.north_visible {
+                    bounds = merge_bounds(
+                        bounds,
+                        course_overlay_bounds(self.points[1], helper, self.north_angle),
+                    );
+                }
+            }
+        }
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
                 bounds,
@@ -2718,6 +2938,16 @@ impl App {
                 bounds,
                 north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
             );
+        }
+        if self.course_visible {
+            if let Some(helper) = self.helper_point {
+                if self.north_visible {
+                    bounds = merge_bounds(
+                        bounds,
+                        course_overlay_bounds(self.points[1], helper, self.north_angle),
+                    );
+                }
+            }
         }
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
