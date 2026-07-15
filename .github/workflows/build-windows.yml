@@ -7,6 +7,12 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+  WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+
 jobs:
   build:
     runs-on: windows-latest
@@ -19,6 +25,23 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: Sign executable when certificate is configured
+        if: ${{ env.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "ProtractorPlus-signing.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signTool) {
+            throw "SignTool.exe was not found on the Windows runner."
+          }
+
+          & $signTool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target/release/ProtractorPlus.exe
+          & $signTool.FullName verify /pa /v target/release/ProtractorPlus.exe
+          Remove-Item $pfxPath -Force
 
       - name: Upload executable
         uses: actions/upload-artifact@v6

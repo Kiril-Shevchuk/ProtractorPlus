@@ -28,6 +28,7 @@ pub const MENU_COURSE_PLUS: u32 = 15;
 pub const MENU_PLUS_DEGREES: u32 = 16;
 pub const MENU_FRONT_PLUS: u32 = 17;
 pub const MENU_DISTANCE_PLUS: u32 = 18;
+pub const MENU_XTK_PLUS: u32 = 19;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
@@ -38,6 +39,7 @@ pub struct ContextMenuState {
     pub inversion: bool,
     pub hypotenuse: bool,
     pub front_plus: bool,
+    pub xtk_plus: bool,
     pub distance_plus: bool,
     pub north_plus: bool,
 }
@@ -129,6 +131,7 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
     append_toggle_item(menu, MENU_COURSE_PLUS, "Курс +", state.course_plus);
     append_toggle_item(menu, MENU_PLUS_DEGREES, "Градуси +", state.plus_degrees);
     append_toggle_item(menu, MENU_FRONT_PLUS, "Фронт +", state.front_plus);
+    append_toggle_item(menu, MENU_XTK_PLUS, "XTK +", state.xtk_plus);
     append_toggle_item(menu, MENU_DISTANCE_PLUS, "Дистанція +", state.distance_plus);
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));

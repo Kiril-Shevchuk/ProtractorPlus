@@ -18,6 +18,7 @@ pub enum DistanceKind {
     Hypotenuse,
     FrontLeft,
     FrontRight,
+    FrontPerpendicular,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +49,51 @@ fn midpoint(a: Point, b: Point) -> Point {
     }
 }
 
+fn bisector_direction(points: [Point; 3]) -> Option<(f32, f32)> {
+    let vertex = points[1];
+    let left = points[0];
+    let right = points[2];
+    let left_len = length(vertex, left);
+    let right_len = length(vertex, right);
+    if left_len < EPSILON || right_len < EPSILON {
+        return None;
+    }
+
+    let left_unit = (
+        (left.x - vertex.x) / left_len,
+        (left.y - vertex.y) / left_len,
+    );
+    let right_unit = (
+        (right.x - vertex.x) / right_len,
+        (right.y - vertex.y) / right_len,
+    );
+    let mut bx = left_unit.0 + right_unit.0;
+    let mut by = left_unit.1 + right_unit.1;
+    let magnitude = (bx * bx + by * by).sqrt();
+    if magnitude < EPSILON {
+        bx = -left_unit.1;
+        by = left_unit.0;
+    } else {
+        bx /= magnitude;
+        by /= magnitude;
+    }
+    Some((bx, by))
+}
+
+fn helper_bisector_foot(points: [Point; 3], helper: Point) -> Point {
+    let vertex = points[1];
+    let Some((bx, by)) = bisector_direction(points) else {
+        return vertex;
+    };
+    let hx = helper.x - vertex.x;
+    let hy = helper.y - vertex.y;
+    let projection = hx * bx + hy * by;
+    Point {
+        x: vertex.x + bx * projection,
+        y: vertex.y + by * projection,
+    }
+}
+
 fn segment_for_kind(
     points: [Point; 3],
     helper: Point,
@@ -60,6 +106,7 @@ fn segment_for_kind(
         DistanceKind::Hypotenuse => (points[0], points[2]),
         DistanceKind::FrontLeft => (helper, points[0]),
         DistanceKind::FrontRight => (helper, points[2]),
+        DistanceKind::FrontPerpendicular => (helper, helper_bisector_foot(points, helper)),
     }
 }
 
@@ -72,7 +119,8 @@ fn reference_for_kind(points: [Point; 3], helper: Point, kind: DistanceKind) -> 
         // Place cross-line labels away from the blue vertex.
         DistanceKind::Hypotenuse
         | DistanceKind::FrontLeft
-        | DistanceKind::FrontRight => points[1],
+        | DistanceKind::FrontRight
+        | DistanceKind::FrontPerpendicular => points[1],
     }
 }
 
@@ -101,7 +149,11 @@ fn panel_center(points: [Point; 3], helper: Point, kind: DistanceKind) -> Point 
     }
 }
 
-fn visible_kinds(show_hypotenuse: bool, show_front_plus: bool) -> Vec<DistanceKind> {
+fn visible_kinds(
+    show_hypotenuse: bool,
+    show_front_plus: bool,
+    show_xtk_plus: bool,
+) -> Vec<DistanceKind> {
     let mut kinds = vec![
         DistanceKind::Base,
         DistanceKind::LeftRay,
@@ -113,6 +165,9 @@ fn visible_kinds(show_hypotenuse: bool, show_front_plus: bool) -> Vec<DistanceKi
     if show_front_plus {
         kinds.push(DistanceKind::FrontLeft);
         kinds.push(DistanceKind::FrontRight);
+    }
+    if show_xtk_plus {
+        kinds.push(DistanceKind::FrontPerpendicular);
     }
     kinds
 }
@@ -204,9 +259,10 @@ pub fn distance_panels(
     meters_per_pixel: f32,
     show_hypotenuse: bool,
     show_front_plus: bool,
+    show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
 ) -> Vec<DistancePanel> {
-    visible_kinds(show_hypotenuse, show_front_plus)
+    visible_kinds(show_hypotenuse, show_front_plus, show_xtk_plus)
         .into_iter()
         .map(|kind| {
             let center = panel_center(points, helper, kind);
@@ -229,6 +285,7 @@ pub fn draw_distance_overlay(
     meters_per_pixel: f32,
     show_hypotenuse: bool,
     show_front_plus: bool,
+    show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
 ) {
     for panel in distance_panels(
@@ -237,22 +294,30 @@ pub fn draw_distance_overlay(
         meters_per_pixel,
         show_hypotenuse,
         show_front_plus,
+        show_xtk_plus,
         editor,
     ) {
         let editing = editor
             .map(|active| active.kind == panel.kind)
             .unwrap_or(false);
-        let background = if editing {
-            Color::from_rgba8(205, 255, 215, 225)
+        let is_xtk = panel.kind == DistanceKind::FrontPerpendicular;
+        let background = match (is_xtk, editing) {
+            (true, true) => Color::from_rgba8(255, 205, 205, 225),
+            (true, false) => Color::from_rgba8(255, 225, 225, 190),
+            (false, true) => Color::from_rgba8(205, 255, 215, 225),
+            (false, false) => Color::from_rgba8(255, 255, 255, 178),
+        };
+        let foreground = if is_xtk {
+            Color::from_rgba8(145, 24, 24, 250)
         } else {
-            Color::from_rgba8(255, 255, 255, 178)
+            Color::from_rgba8(18, 18, 18, 250)
         };
         draw_distance_panel(
             pixmap,
             &panel.text,
             panel.center,
             background,
-            Color::from_rgba8(18, 18, 18, 250),
+            foreground,
         );
     }
 }
@@ -263,6 +328,7 @@ pub fn distance_bounds(
     meters_per_pixel: f32,
     show_hypotenuse: bool,
     show_front_plus: bool,
+    show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
 ) -> ContentBounds {
     let panels = distance_panels(
@@ -271,6 +337,7 @@ pub fn distance_bounds(
         meters_per_pixel,
         show_hypotenuse,
         show_front_plus,
+        show_xtk_plus,
         editor,
     );
     let mut bounds = ContentBounds {
@@ -295,6 +362,7 @@ pub fn hit_test_distance_panel(
     meters_per_pixel: f32,
     show_hypotenuse: bool,
     show_front_plus: bool,
+    show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
 ) -> Option<DistanceKind> {
     distance_panels(
@@ -303,6 +371,7 @@ pub fn hit_test_distance_panel(
         meters_per_pixel,
         show_hypotenuse,
         show_front_plus,
+        show_xtk_plus,
         editor,
     )
     .into_iter()

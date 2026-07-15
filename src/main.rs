@@ -37,7 +37,7 @@ use crate::win32_layered::{
     present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
     MENU_COURSE_PLUS, MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS,
-    MENU_PLUS_DEGREES,
+    MENU_PLUS_DEGREES, MENU_XTK_PLUS,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -49,6 +49,8 @@ const LOCK_PANEL_SIZE: f32 = 15.5;
 const LOCK_PANEL_RADIUS: f32 = 3.5;
 const LOCK_DISTANCE: f32 = 34.0;
 const RED_LOCK_DISTANCE: f32 = 27.0;
+const HELPER_LOCK_OFFSET_X: f32 = 18.0;
+const HELPER_LOCK_OFFSET_Y: f32 = -18.0;
 const EPSILON: f32 = 0.0001;
 const HELPER_HANDLE_INDEX: usize = 3;
 const HELPER_DISTANCE: f32 = 92.0;
@@ -79,6 +81,7 @@ struct SavedState {
     inverted: bool,
     hypotenuse_visible: bool,
     front_plus_visible: bool,
+    xtk_visible: bool,
     distance_visible: bool,
     meters_per_pixel: f32,
     north_visible: bool,
@@ -88,6 +91,7 @@ struct SavedState {
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
+    helper_pinned: bool,
     window_x: i32,
     window_y: i32,
 }
@@ -157,6 +161,7 @@ fn load_state() -> Option<SavedState> {
             inverted: false,
             hypotenuse_visible: false,
             front_plus_visible: false,
+            xtk_visible: false,
             distance_visible: false,
             meters_per_pixel: 0.0,
             north_visible: false,
@@ -166,6 +171,7 @@ fn load_state() -> Option<SavedState> {
             blue_pinned: false,
             left_red_pinned: false,
             right_red_pinned: false,
+            helper_pinned: false,
             window_x: parse_next(&mut values)?,
             window_y: parse_next(&mut values)?,
         }),
@@ -187,6 +193,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: false,
                 hypotenuse_visible: false,
                 front_plus_visible: false,
+                xtk_visible: false,
                 distance_visible: false,
                 meters_per_pixel: 0.0,
                 north_visible: false,
@@ -196,6 +203,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -218,6 +226,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: false,
                 meters_per_pixel: 0.0,
                 north_visible: false,
@@ -227,6 +236,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -249,6 +259,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: false,
@@ -258,6 +269,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -287,6 +299,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: false,
@@ -296,6 +309,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -325,6 +339,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: parse_next::<u8>(&mut values)? != 0,
@@ -334,6 +349,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -363,6 +379,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: parse_next::<u8>(&mut values)? != 0,
@@ -372,6 +389,7 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: false,
                 left_red_pinned: false,
                 right_red_pinned: false,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -401,6 +419,7 @@ fn load_state() -> Option<SavedState> {
                 inverted: parse_next::<u8>(&mut values)? != 0,
                 hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
                 front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                xtk_visible: false,
                 distance_visible: parse_next::<u8>(&mut values)? != 0,
                 meters_per_pixel: parse_next(&mut values)?,
                 north_visible: parse_next::<u8>(&mut values)? != 0,
@@ -410,17 +429,44 @@ fn load_state() -> Option<SavedState> {
                 blue_pinned: parse_next::<u8>(&mut values)? != 0,
                 left_red_pinned: parse_next::<u8>(&mut values)? != 0,
                 right_red_pinned: parse_next::<u8>(&mut values)? != 0,
+                helper_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
         }
-        9 => {
+        9 | 10 | 11 => {
             let helper_enabled = parse_next::<u8>(&mut values)? != 0;
             let helper_x: f32 = parse_next(&mut values)?;
             let helper_y: f32 = parse_next(&mut values)?;
             let angle_locked = parse_next::<u8>(&mut values)? != 0;
             let locked_signed_angle = parse_next(&mut values)?;
             let red_lock_code: u8 = parse_next(&mut values)?;
+            let bisector_visible = parse_next::<u8>(&mut values)? != 0;
+            let plus_degrees_visible = parse_next::<u8>(&mut values)? != 0;
+            let inverted = parse_next::<u8>(&mut values)? != 0;
+            let hypotenuse_visible = parse_next::<u8>(&mut values)? != 0;
+            let front_plus_visible = parse_next::<u8>(&mut values)? != 0;
+            let xtk_visible = if version >= 11 {
+                parse_next::<u8>(&mut values)? != 0
+            } else {
+                // Preserve the v2.8 visual when migrating old settings: the
+                // transverse line used to be part of Front +.
+                front_plus_visible
+            };
+            let distance_visible = parse_next::<u8>(&mut values)? != 0;
+            let meters_per_pixel = parse_next(&mut values)?;
+            let north_visible = parse_next::<u8>(&mut values)? != 0;
+            let north_angle = parse_next(&mut values)?;
+            let north_locked = parse_next::<u8>(&mut values)? != 0;
+            let course_visible = parse_next::<u8>(&mut values)? != 0;
+            let blue_pinned = parse_next::<u8>(&mut values)? != 0;
+            let left_red_pinned = parse_next::<u8>(&mut values)? != 0;
+            let right_red_pinned = parse_next::<u8>(&mut values)? != 0;
+            let helper_pinned = if version >= 10 {
+                parse_next::<u8>(&mut values)? != 0
+            } else {
+                false
+            };
             Some(SavedState {
                 points,
                 helper_point: helper_enabled.then_some(Point { x: helper_x, y: helper_y }),
@@ -431,20 +477,22 @@ fn load_state() -> Option<SavedState> {
                     2 => Some(2),
                     _ => None,
                 },
-                bisector_visible: parse_next::<u8>(&mut values)? != 0,
-                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
-                inverted: parse_next::<u8>(&mut values)? != 0,
-                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
-                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
-                distance_visible: parse_next::<u8>(&mut values)? != 0,
-                meters_per_pixel: parse_next(&mut values)?,
-                north_visible: parse_next::<u8>(&mut values)? != 0,
-                north_angle: parse_next(&mut values)?,
-                north_locked: parse_next::<u8>(&mut values)? != 0,
-                course_visible: parse_next::<u8>(&mut values)? != 0,
-                blue_pinned: parse_next::<u8>(&mut values)? != 0,
-                left_red_pinned: parse_next::<u8>(&mut values)? != 0,
-                right_red_pinned: parse_next::<u8>(&mut values)? != 0,
+                bisector_visible,
+                plus_degrees_visible,
+                inverted,
+                hypotenuse_visible,
+                front_plus_visible,
+                xtk_visible,
+                distance_visible,
+                meters_per_pixel,
+                north_visible,
+                north_angle,
+                north_locked,
+                course_visible,
+                blue_pinned,
+                left_red_pinned,
+                right_red_pinned,
+                helper_pinned,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -626,6 +674,34 @@ fn in_helper_handle(point: Point, helper: Point) -> bool {
     let dx = point.x - helper.x;
     let dy = point.y - helper.y;
     dx * dx + dy * dy <= PLUS_HIT_RADIUS * PLUS_HIT_RADIUS
+}
+
+fn helper_lock_center(helper: Point) -> Point {
+    Point {
+        x: helper.x + HELPER_LOCK_OFFSET_X,
+        y: helper.y + HELPER_LOCK_OFFSET_Y,
+    }
+}
+
+fn in_helper_lock_button(point: Point, helper: Point) -> bool {
+    let center = helper_lock_center(helper);
+    let half = LOCK_PANEL_SIZE * 0.5 + 4.0;
+    point.x >= center.x - half
+        && point.x <= center.x + half
+        && point.y >= center.y - half
+        && point.y <= center.y + half
+}
+
+fn helper_bisector_foot(points: [Point; 3], helper: Point) -> Option<Point> {
+    let vertex = points[1];
+    let (bx, by) = angle_bisector_direction(points)?;
+    let hx = helper.x - vertex.x;
+    let hy = helper.y - vertex.y;
+    let projection = hx * bx + hy * by;
+    Some(Point {
+        x: vertex.x + bx * projection,
+        y: vertex.y + by * projection,
+    })
 }
 
 fn stroke_segment(pixmap: &mut Pixmap, from: Point, to: Point, width: f32, color: Color) {
@@ -1260,6 +1336,27 @@ fn draw_red_lock_icons(
     }
 }
 
+fn draw_helper_lock_icon(
+    pixmap: &mut Pixmap,
+    helper: Point,
+    pinned: bool,
+    inverted: bool,
+) {
+    let open_color = if inverted {
+        Color::from_rgba8(220, 255, 228, 245)
+    } else {
+        Color::from_rgba8(28, 135, 62, 245)
+    };
+    draw_lock_at(
+        pixmap,
+        helper_lock_center(helper),
+        false,
+        pinned,
+        Color::from_rgba8(48, 205, 88, 255),
+        open_color,
+    );
+}
+
 fn draw_dash_dot_line(
     pixmap: &mut Pixmap,
     from: Point,
@@ -1874,7 +1971,7 @@ fn draw_hypotenuse(pixmap: &mut Pixmap, points: [Point; 3]) {
 }
 
 fn draw_front_plus(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
-    let color = Color::from_rgba8(48, 205, 88, 225);
+    let green = Color::from_rgba8(48, 205, 88, 225);
     for red in [points[0], points[2]] {
         draw_dashed_line(
             pixmap,
@@ -1883,10 +1980,38 @@ fn draw_front_plus(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
             6.0,
             4.0,
             1.25,
-            color,
+            green,
             PLUS_HIT_RADIUS * 0.65,
             HANDLE_RADIUS + 2.0,
         );
+    }
+}
+
+fn draw_xtk_plus(pixmap: &mut Pixmap, points: [Point; 3], helper: Point) {
+    // XTK + is an independent perpendicular measurement from the green plus
+    // to the infinite geometric bisector of the main angle.
+    if let Some(foot) = helper_bisector_foot(points, helper) {
+        draw_dashed_line(
+            pixmap,
+            helper,
+            foot,
+            6.0,
+            4.0,
+            1.35,
+            Color::from_rgba8(235, 50, 50, 238),
+            PLUS_HIT_RADIUS * 0.65,
+            0.0,
+        );
+    }
+}
+
+fn xtk_overlay_bounds(points: [Point; 3], helper: Point) -> ContentBounds {
+    let foot = helper_bisector_foot(points, helper).unwrap_or(helper);
+    ContentBounds {
+        min_x: helper.x.min(foot.x) - 5.0,
+        min_y: helper.y.min(foot.y) - 5.0,
+        max_x: helper.x.max(foot.x) + 5.0,
+        max_y: helper.y.max(foot.y) + 5.0,
     }
 }
 
@@ -1905,6 +2030,7 @@ struct App {
     inverted: bool,
     hypotenuse_visible: bool,
     front_plus_visible: bool,
+    xtk_visible: bool,
     distance_visible: bool,
     meters_per_pixel: f32,
     north_visible: bool,
@@ -1915,6 +2041,7 @@ struct App {
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
+    helper_pinned: bool,
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
@@ -1951,6 +2078,7 @@ impl App {
             front_plus_visible: saved
                 .map(|state| state.front_plus_visible)
                 .unwrap_or(false),
+            xtk_visible: saved.map(|state| state.xtk_visible).unwrap_or(false),
             distance_visible: saved.map(|state| state.distance_visible).unwrap_or(false),
             meters_per_pixel: saved
                 .map(|state| state.meters_per_pixel)
@@ -1963,6 +2091,7 @@ impl App {
             blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
             left_red_pinned: saved.map(|state| state.left_red_pinned).unwrap_or(false),
             right_red_pinned: saved.map(|state| state.right_red_pinned).unwrap_or(false),
+            helper_pinned: saved.map(|state| state.helper_pinned).unwrap_or(false),
             distance_editor: None,
             last_distance_click: None,
             last_plus_click: None,
@@ -2023,7 +2152,19 @@ impl App {
     }
 
     fn any_screen_pin(&self) -> bool {
-        self.blue_pinned || self.any_red_pinned()
+        self.blue_pinned || self.any_red_pinned() || self.helper_pinned
+    }
+
+    fn toggle_helper_pin(&mut self) {
+        if self.helper_point.is_none() {
+            return;
+        }
+        self.helper_pinned = !self.helper_pinned;
+        if self.helper_pinned && self.active_handle == Some(HELPER_HANDLE_INDEX) {
+            self.active_handle = None;
+        }
+        self.save_state();
+        self.request_redraw();
     }
 
     fn toggle_blue_pin(&mut self) {
@@ -2075,7 +2216,7 @@ impl App {
     }
 
     fn snap_helper_to_hypotenuse_midpoint(&mut self) {
-        if self.helper_point.is_none() {
+        if self.helper_point.is_none() || self.helper_pinned {
             return;
         }
         self.helper_point = Some(Point {
@@ -2271,6 +2412,9 @@ impl App {
     }
 
     fn rotate_helper_about_vertex_by_degrees(&mut self, delta_degrees: f32) {
+        if self.helper_pinned {
+            return;
+        }
         let Some(helper) = self.helper_point else { return; };
         let vertex = self.points[1];
         let radius = vector_length(vertex, helper);
@@ -2286,8 +2430,11 @@ impl App {
             self.distance_visible = false;
             self.distance_editor = None;
             self.course_visible = false;
+            self.xtk_visible = false;
+            self.helper_pinned = false;
             None
         } else {
+            self.helper_pinned = false;
             Some(self.default_helper_point())
         };
         self.fit_window_to_content();
@@ -2347,6 +2494,12 @@ impl App {
             MENU_INVERSION => self.inverted = !self.inverted,
             MENU_HYPOTENUSE => self.hypotenuse_visible = !self.hypotenuse_visible,
             MENU_FRONT_PLUS => self.front_plus_visible = !self.front_plus_visible,
+            MENU_XTK_PLUS => {
+                self.xtk_visible = !self.xtk_visible;
+                if self.xtk_visible && self.helper_point.is_none() {
+                    self.helper_point = Some(self.default_helper_point());
+                }
+            }
             MENU_DISTANCE_PLUS => {
                 self.toggle_distance_mode();
                 return;
@@ -2375,6 +2528,7 @@ impl App {
             inversion: self.inverted,
             hypotenuse: self.hypotenuse_visible,
             front_plus: self.front_plus_visible,
+            xtk_plus: self.xtk_visible,
             distance_plus: self.distance_visible,
             north_plus: self.north_visible,
         }
@@ -2396,7 +2550,7 @@ impl App {
             _ => 0u8,
         };
         let lines = [
-            "9".to_string(),
+            "11".to_string(),
             format!("{} {}", p[0].x, p[0].y),
             format!("{} {}", p[1].x, p[1].y),
             format!("{} {}", p[2].x, p[2].y),
@@ -2410,6 +2564,7 @@ impl App {
             u8::from(self.inverted).to_string(),
             u8::from(self.hypotenuse_visible).to_string(),
             u8::from(self.front_plus_visible).to_string(),
+            u8::from(self.xtk_visible).to_string(),
             u8::from(self.distance_visible).to_string(),
             self.meters_per_pixel.to_string(),
             u8::from(self.north_visible).to_string(),
@@ -2419,6 +2574,7 @@ impl App {
             u8::from(self.blue_pinned).to_string(),
             u8::from(self.left_red_pinned).to_string(),
             u8::from(self.right_red_pinned).to_string(),
+            u8::from(self.helper_pinned).to_string(),
             format!("{} {}", window_x, window_y),
         ];
         let text = format!("{}\n", lines.join("\n"));
@@ -2455,6 +2611,9 @@ impl App {
         if let Some(helper) = self.helper_point {
             if self.front_plus_visible {
                 draw_front_plus(&mut pixmap, self.points, helper);
+            }
+            if self.xtk_visible {
+                draw_xtk_plus(&mut pixmap, self.points, helper);
             }
         }
         if self.bisector_visible {
@@ -2503,9 +2662,11 @@ impl App {
                     self.meters_per_pixel,
                     self.hypotenuse_visible,
                     self.front_plus_visible,
+                    self.xtk_visible,
                     self.distance_editor.as_ref(),
                 );
             }
+            draw_helper_lock_icon(&mut pixmap, helper, self.helper_pinned, self.inverted);
         }
         draw_lock_icon(
             &mut pixmap,
@@ -2543,6 +2704,7 @@ impl App {
             self.meters_per_pixel,
             self.hypotenuse_visible,
             self.front_plus_visible,
+            self.xtk_visible,
             self.distance_editor.as_ref(),
         )
     }
@@ -2670,6 +2832,30 @@ impl App {
                 if sine > EPSILON {
                     self.set_shared_red_radius((metres / scale) / (2.0 * sine));
                 }
+            }
+            DistanceKind::FrontPerpendicular => {
+                if self.helper_pinned {
+                    return;
+                }
+                let vertex = self.points[1];
+                let Some((bx, by)) = angle_bisector_direction(self.points) else {
+                    return;
+                };
+                let hx = helper.x - vertex.x;
+                let hy = helper.y - vertex.y;
+                let along = hx * bx + hy * by;
+                let nx = -by;
+                let ny = bx;
+                let signed_offset = hx * nx + hy * ny;
+                let sign = if signed_offset < 0.0 { -1.0 } else { 1.0 };
+                let target_pixels = metres / scale;
+                self.helper_point = Some(clamp_line_length(
+                    vertex,
+                    Point {
+                        x: vertex.x + bx * along + nx * sign * target_pixels,
+                        y: vertex.y + by * along + ny * sign * target_pixels,
+                    },
+                ));
             }
             DistanceKind::FrontLeft | DistanceKind::FrontRight => {
                 let index = if kind == DistanceKind::FrontLeft { 0 } else { 2 };
@@ -2939,6 +3125,12 @@ impl ApplicationHandler for App {
                         if self.hide_angle_panel_at(pos) {
                             return;
                         }
+                        if let Some(helper) = self.helper_point {
+                            if in_helper_lock_button(pos, helper) {
+                                self.toggle_helper_pin();
+                                return;
+                            }
+                        }
                         if let Some(index) = in_red_lock_button(pos, self.points) {
                             self.toggle_red_pin(index);
                             return;
@@ -2972,6 +3164,10 @@ impl ApplicationHandler for App {
                                 }
                             }
                             if let Some(helper) = self.helper_point {
+                                if in_helper_lock_button(pos, helper) {
+                                    self.toggle_helper_pin();
+                                    return;
+                                }
                                 if in_helper_handle(pos, helper) {
                                     let now = Instant::now();
                                     let is_double = self
@@ -3256,6 +3452,7 @@ impl App {
             self.blue_pinned = false;
             self.left_red_pinned = false;
             self.right_red_pinned = false;
+            self.helper_pinned = false;
             if self.helper_point.is_some() {
                 self.helper_point = Some(self.default_helper_point());
             }
@@ -3302,6 +3499,9 @@ impl App {
                     self.bisector_visible,
                 ),
             );
+            if self.xtk_visible {
+                bounds = merge_bounds(bounds, xtk_overlay_bounds(self.points, helper));
+            }
             if self.distance_visible && self.meters_per_pixel > 0.0 {
                 bounds = merge_bounds(
                     bounds,
@@ -3311,16 +3511,20 @@ impl App {
                         self.meters_per_pixel,
                         self.hypotenuse_visible,
                         self.front_plus_visible,
+                        self.xtk_visible,
                         self.distance_editor.as_ref(),
                     ),
                 );
             }
         }
-        let lock_centers = [
+        let mut lock_centers = vec![
             lock_center(self.points),
             red_lock_center(self.points, 0),
             red_lock_center(self.points, 2),
         ];
+        if let Some(helper) = self.helper_point {
+            lock_centers.push(helper_lock_center(helper));
+        }
         let mut min_x = bounds.min_x;
         let mut min_y = bounds.min_y;
         for center in lock_centers {
@@ -3385,6 +3589,9 @@ impl App {
                     self.bisector_visible,
                 ),
             );
+            if self.xtk_visible {
+                bounds = merge_bounds(bounds, xtk_overlay_bounds(self.points, helper));
+            }
             if self.distance_visible && self.meters_per_pixel > 0.0 {
                 bounds = merge_bounds(
                     bounds,
@@ -3394,16 +3601,20 @@ impl App {
                         self.meters_per_pixel,
                         self.hypotenuse_visible,
                         self.front_plus_visible,
+                        self.xtk_visible,
                         self.distance_editor.as_ref(),
                     ),
                 );
             }
         }
-        let lock_centers = [
+        let mut lock_centers = vec![
             lock_center(self.points),
             red_lock_center(self.points, 0),
             red_lock_center(self.points, 2),
         ];
+        if let Some(helper) = self.helper_point {
+            lock_centers.push(helper_lock_center(helper));
+        }
         let mut max_x = bounds.max_x;
         let mut max_y = bounds.max_y;
         for center in lock_centers {
@@ -3500,20 +3711,25 @@ impl App {
                     y: target.y + b_off.1,
                 },
             );
-            if let Some((hx, hy)) = helper_off {
-                self.helper_point = Some(clamp_line_length(
-                    target,
-                    Point {
-                        x: target.x + hx,
-                        y: target.y + hy,
-                    },
-                ));
+            if !self.helper_pinned {
+                if let Some((hx, hy)) = helper_off {
+                    self.helper_point = Some(clamp_line_length(
+                        target,
+                        Point {
+                            x: target.x + hx,
+                            y: target.y + hy,
+                        },
+                    ));
+                }
             }
             return;
         }
 
         let vertex = self.points[1];
         if index == HELPER_HANDLE_INDEX {
+            if self.helper_pinned {
+                return;
+            }
             let moved = clamp_line_length(vertex, target);
             if vector_length(vertex, moved) >= EPSILON {
                 self.helper_point = Some(moved);
@@ -3585,7 +3801,9 @@ impl App {
         if let Some(helper) = self.helper_point {
             let dx = helper.x - x;
             let dy = helper.y - y;
-            if dx * dx + dy * dy <= PLUS_HIT_RADIUS * PLUS_HIT_RADIUS {
+            if !self.helper_pinned
+                && dx * dx + dy * dy <= PLUS_HIT_RADIUS * PLUS_HIT_RADIUS
+            {
                 return Some(HELPER_HANDLE_INDEX);
             }
         }
