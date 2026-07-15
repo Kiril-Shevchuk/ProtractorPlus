@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.1
+
+- Fixed `Коробка +` point placement on the transparent Windows overlay.
+- While an open box is being created, the overlay temporarily expands to the active monitor and receives clicks across otherwise transparent pixels.
+- Left clicks in capture mode now have priority over the existing protractor handles and panels.
+- Closing the contour, reaching 10 points, or disabling `Коробка +` restores the compact overlay without changing screen positions.
+- Preserves and restores the global click-through state around box capture mode.
+
 ## 3.0.0
 
 - Додано режим `Коробка +` у контекстне меню.

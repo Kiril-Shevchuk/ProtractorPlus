@@ -398,9 +398,17 @@ pub fn render_angle_measure(
     points: [Point; 3],
     inverted: bool,
     show_angle_label: bool,
+    capture_input_surface: bool,
 ) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap allocation");
-    pixmap.fill(Color::TRANSPARENT);
+    // A per-pixel layered window does not receive mouse input on fully
+    // transparent pixels. During Box + point capture we use alpha=1 as an
+    // effectively invisible hit-test surface across the monitor.
+    pixmap.fill(if capture_input_surface {
+        Color::from_rgba8(0, 0, 0, 1)
+    } else {
+        Color::TRANSPARENT
+    });
 
     let a = points[0];
     let vertex = points[1];

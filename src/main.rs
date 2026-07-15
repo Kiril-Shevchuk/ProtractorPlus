@@ -2240,6 +2240,8 @@ struct App {
     box_visible: bool,
     box_points: Vec<Point>,
     box_closed: bool,
+    box_capture_active: bool,
+    box_restore_click_through: bool,
     hidden_box_distance_panels: u16,
     hidden_box_bearing_panels: u16,
     hidden_angle_panels: HiddenAnglePanels,
@@ -2300,6 +2302,8 @@ impl App {
             box_visible: box_saved.visible,
             box_points: box_saved.points,
             box_closed: box_saved.closed,
+            box_capture_active: false,
+            box_restore_click_through: false,
             hidden_box_distance_panels: 0,
             hidden_box_bearing_panels: 0,
             hidden_angle_panels: HiddenAnglePanels::default(),
@@ -2359,6 +2363,118 @@ impl App {
         for point in &mut self.box_points {
             point.x += dx;
             point.y += dy;
+        }
+    }
+
+    fn shift_local_geometry(&mut self, dx: f32, dy: f32) {
+        for point in &mut self.points {
+            point.x += dx;
+            point.y += dy;
+        }
+        if let Some(helper) = &mut self.helper_point {
+            helper.x += dx;
+            helper.y += dy;
+        }
+        for point in &mut self.box_points {
+            point.x += dx;
+            point.y += dy;
+        }
+    }
+
+    fn enter_box_capture_mode(&mut self) {
+        if self.box_capture_active
+            || !self.box_visible
+            || self.box_closed
+            || self.box_points.len() >= MAX_BOX_POINTS
+        {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let monitor = window
+            .current_monitor()
+            .map(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                MonitorGeometry {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                }
+            })
+            .or(self.startup_monitor)
+            .unwrap_or(MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+        let old_position = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(monitor.x, monitor.y));
+
+        self.box_restore_click_through = CLICK_THROUGH.swap(false, Ordering::Relaxed);
+        unsafe {
+            set_click_through(hwnd_from_window(&window), false);
+        }
+
+        // Keep every existing object at the same screen coordinate while the
+        // local window origin moves to the monitor origin.
+        self.shift_local_geometry(
+            (old_position.x - monitor.x) as f32,
+            (old_position.y - monitor.y) as f32,
+        );
+        self.box_capture_active = true;
+        window.set_outer_position(PhysicalPosition::new(monitor.x, monitor.y));
+        let _ = window.request_inner_size(PhysicalSize::new(
+            monitor.width,
+            monitor.height,
+        ));
+        window.request_redraw();
+    }
+
+    fn leave_box_capture_mode(&mut self) {
+        if !self.box_capture_active {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            self.box_capture_active = false;
+            return;
+        };
+
+        // Compact the full-screen capture surface back around the visible
+        // construction without moving any object in screen coordinates.
+        let bounds = self.calculated_content_bounds();
+        let shift_x = CONTENT_PAD - bounds.min_x;
+        let shift_y = CONTENT_PAD - bounds.min_y;
+        let old_position = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        self.shift_local_geometry(shift_x, shift_y);
+        self.box_capture_active = false;
+        CLICK_THROUGH.store(self.box_restore_click_through, Ordering::Relaxed);
+        unsafe {
+            set_click_through(
+                hwnd_from_window(&window),
+                self.box_restore_click_through,
+            );
+        }
+        self.box_restore_click_through = false;
+        window.set_outer_position(PhysicalPosition::new(
+            old_position.x - shift_x.round() as i32,
+            old_position.y - shift_y.round() as i32,
+        ));
+        self.fit_window_to_content();
+        window.request_redraw();
+    }
+
+    fn refresh_box_capture_mode(&mut self) {
+        if self.box_visible && !self.box_closed && self.box_points.len() < MAX_BOX_POINTS {
+            self.enter_box_capture_mode();
+        } else {
+            self.leave_box_capture_mode();
         }
     }
 
@@ -2463,6 +2579,7 @@ impl App {
         } else {
             self.center_blue_on_current_monitor();
         }
+        self.refresh_box_capture_mode();
         self.redraw();
     }
 
@@ -2602,7 +2719,10 @@ impl App {
         self.box_visible = !self.box_visible;
         self.hidden_box_distance_panels = 0;
         self.hidden_box_bearing_panels = 0;
-        self.fit_window_to_content();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
         self.save_state();
         self.request_redraw();
     }
@@ -2615,7 +2735,7 @@ impl App {
             self.box_closed = true;
             self.hidden_box_distance_panels = 0;
             self.hidden_box_bearing_panels = 0;
-            self.fit_window_to_content();
+            self.refresh_box_capture_mode();
             self.save_state();
             self.request_redraw();
             return true;
@@ -2629,7 +2749,10 @@ impl App {
         self.box_points.push(point);
         self.hidden_box_distance_panels = 0;
         self.hidden_box_bearing_panels = 0;
-        self.fit_window_to_content();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
         self.save_state();
         self.request_redraw();
         true
@@ -2649,7 +2772,10 @@ impl App {
         }
         self.hidden_box_distance_panels = 0;
         self.hidden_box_bearing_panels = 0;
-        self.fit_window_to_content();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
         self.save_state();
         self.request_redraw();
     }
@@ -3294,6 +3420,7 @@ impl App {
             self.points,
             self.inverted,
             false,
+            self.box_capture_active,
         );
 
         if self.hypotenuse_visible {
@@ -3900,6 +4027,13 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
+                            // While Box + is collecting points, every left click
+                            // belongs to the box tool before any other handle or
+                            // panel can consume it.
+                            if self.box_capture_active && self.add_or_close_box_point(pos) {
+                                self.active_handle = None;
+                                return;
+                            }
                             if self.north_visible {
                                 let vertex = self.points[1];
                                 if in_north_lock_button(pos, vertex, self.north_angle) {
@@ -4314,6 +4448,9 @@ impl App {
     }
 
     fn fit_window_to_content(&mut self) {
+        if self.box_capture_active {
+            return;
+        }
         let Some(window) = &self.window else {
             return;
         };
