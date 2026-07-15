@@ -1,9 +1,13 @@
-use crate::draw::{
-    draw_text_panel, text_panel_rect, ContentBounds, PanelRect, Point,
-};
+use crate::draw::{fill_rounded_rect, ContentBounds, PanelRect, Point};
+use crate::text::{draw_text, layout_text};
 use tiny_skia::{Color, Pixmap};
 
 const LABEL_OFFSET: f32 = 18.0;
+const DISTANCE_FONT_SIZE: f32 = 14.85;
+const DISTANCE_PAD_X: f32 = 9.0;
+const DISTANCE_PAD_Y: f32 = 6.3;
+const DISTANCE_MIN_HEIGHT: f32 = 25.2;
+const DISTANCE_RADIUS: f32 = 7.2;
 const EPSILON: f32 = 0.0001;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +156,48 @@ fn panel_text(
     format_distance(meters_for_kind(points, helper, meters_per_pixel, kind))
 }
 
+fn distance_panel_rect(text: &str, cx: f32, cy: f32) -> PanelRect {
+    let layout = layout_text(text, DISTANCE_FONT_SIZE);
+    let width = layout.width + 2.0 * DISTANCE_PAD_X;
+    let height = (layout.height + 2.0 * DISTANCE_PAD_Y).max(DISTANCE_MIN_HEIGHT);
+    PanelRect {
+        x: cx - width * 0.5,
+        y: cy - height * 0.5,
+        width,
+        height,
+    }
+}
+
+fn draw_distance_panel(
+    pixmap: &mut Pixmap,
+    text: &str,
+    center: Point,
+    background: Color,
+    foreground: Color,
+) {
+    let rect = distance_panel_rect(text, center.x, center.y);
+    fill_rounded_rect(
+        pixmap,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        DISTANCE_RADIUS,
+        background,
+    );
+    let layout = layout_text(text, DISTANCE_FONT_SIZE);
+    let text_x = center.x - (layout.xmin + layout.xmax) * 0.5;
+    let baseline = center.y + (layout.ymin + layout.ymax) * 0.5;
+    draw_text(
+        pixmap,
+        text,
+        text_x,
+        baseline,
+        DISTANCE_FONT_SIZE,
+        foreground,
+    );
+}
+
 pub fn distance_panels(
     points: [Point; 3],
     helper: Point,
@@ -165,7 +211,7 @@ pub fn distance_panels(
         .map(|kind| {
             let center = panel_center(points, helper, kind);
             let text = panel_text(points, helper, meters_per_pixel, kind, editor);
-            let rect = text_panel_rect(&text, center.x, center.y);
+            let rect = distance_panel_rect(&text, center.x, center.y);
             DistancePanel {
                 kind,
                 rect,
@@ -201,11 +247,10 @@ pub fn draw_distance_overlay(
         } else {
             Color::from_rgba8(255, 255, 255, 178)
         };
-        draw_text_panel(
+        draw_distance_panel(
             pixmap,
             &panel.text,
-            panel.center.x,
-            panel.center.y,
+            panel.center,
             background,
             Color::from_rgba8(18, 18, 18, 250),
         );

@@ -20,8 +20,8 @@ use distance::{
 };
 use draw::{
     angle_between, content_bounds, draw_arc, draw_plus_handle, draw_text_panel,
-    fill_rounded_rect, label_panel_rect, stroke_line, text_panel_rect, ContentBounds, Point,
-    HANDLE_RADIUS,
+    fill_rounded_rect, label_panel_rect, stroke_line, text_panel_rect, ContentBounds, PanelRect,
+    Point, HANDLE_RADIUS,
 };
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use winit::application::ApplicationHandler;
@@ -61,8 +61,7 @@ const NORTH_LABEL_OFFSET: f32 = 20.0;
 const NORTH_TEXT_SIZE: f32 = 16.0;
 const NORTH_HANDLE_INDEX: usize = 4;
 const NORTH_HANDLE_HIT_RADIUS: f32 = 15.0;
-const NORTH_LOCK_ALONG: f32 = 50.0;
-const NORTH_LOCK_SIDE: f32 = 17.0;
+const NORTH_LOCK_GAP: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -81,6 +80,9 @@ struct SavedState {
     north_visible: bool,
     north_angle: f32,
     north_locked: bool,
+    blue_pinned: bool,
+    left_red_pinned: bool,
+    right_red_pinned: bool,
     window_x: i32,
     window_y: i32,
 }
@@ -143,6 +145,9 @@ fn load_state() -> Option<SavedState> {
             north_visible: false,
             north_angle: NORTH_DEFAULT_ANGLE,
             north_locked: false,
+            blue_pinned: false,
+            left_red_pinned: false,
+            right_red_pinned: false,
             window_x: parse_next(&mut values)?,
             window_y: parse_next(&mut values)?,
         }),
@@ -169,6 +174,9 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -196,6 +204,9 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -223,6 +234,9 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -257,6 +271,9 @@ fn load_state() -> Option<SavedState> {
                 north_visible: false,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -291,6 +308,9 @@ fn load_state() -> Option<SavedState> {
                 north_visible: parse_next::<u8>(&mut values)? != 0,
                 north_angle: NORTH_DEFAULT_ANGLE,
                 north_locked: false,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -325,6 +345,46 @@ fn load_state() -> Option<SavedState> {
                 north_visible: parse_next::<u8>(&mut values)? != 0,
                 north_angle: parse_next(&mut values)?,
                 north_locked: parse_next::<u8>(&mut values)? != 0,
+                blue_pinned: false,
+                left_red_pinned: false,
+                right_red_pinned: false,
+                window_x: parse_next(&mut values)?,
+                window_y: parse_next(&mut values)?,
+            })
+        }
+        8 => {
+            let helper_enabled = parse_next::<u8>(&mut values)? != 0;
+            let helper_x: f32 = parse_next(&mut values)?;
+            let helper_y: f32 = parse_next(&mut values)?;
+            let angle_locked = parse_next::<u8>(&mut values)? != 0;
+            let locked_signed_angle = parse_next(&mut values)?;
+            let red_lock_code: u8 = parse_next(&mut values)?;
+            Some(SavedState {
+                points,
+                helper_point: helper_enabled.then_some(Point {
+                    x: helper_x,
+                    y: helper_y,
+                }),
+                angle_locked,
+                locked_signed_angle,
+                red_locked_index: match red_lock_code {
+                    1 => Some(0),
+                    2 => Some(2),
+                    _ => None,
+                },
+                bisector_visible: parse_next::<u8>(&mut values)? != 0,
+                plus_degrees_visible: parse_next::<u8>(&mut values)? != 0,
+                inverted: parse_next::<u8>(&mut values)? != 0,
+                hypotenuse_visible: parse_next::<u8>(&mut values)? != 0,
+                front_plus_visible: parse_next::<u8>(&mut values)? != 0,
+                distance_visible: parse_next::<u8>(&mut values)? != 0,
+                meters_per_pixel: parse_next(&mut values)?,
+                north_visible: parse_next::<u8>(&mut values)? != 0,
+                north_angle: parse_next(&mut values)?,
+                north_locked: parse_next::<u8>(&mut values)? != 0,
+                blue_pinned: parse_next::<u8>(&mut values)? != 0,
+                left_red_pinned: parse_next::<u8>(&mut values)? != 0,
+                right_red_pinned: parse_next::<u8>(&mut values)? != 0,
                 window_x: parse_next(&mut values)?,
                 window_y: parse_next(&mut values)?,
             })
@@ -606,6 +666,24 @@ fn north_arc_geometry(points: [Point; 3], north_angle: f32) -> Option<(f32, f32,
     Some((bisector_angle, sweep, mid_angle, radius))
 }
 
+fn north_angle_label_rect(points: [Point; 3], north_angle: f32) -> Option<PanelRect> {
+    let vertex = points[1];
+    let (_bisector_angle, sweep, mid_angle, radius) = north_arc_geometry(points, north_angle)?;
+    let angle_text = format!("{}°", bearing_degrees(sweep));
+    let center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+    Some(text_panel_rect(&angle_text, center.x, center.y))
+}
+
+fn in_north_angle_label(point: Point, points: [Point; 3], north_angle: f32) -> bool {
+    let Some(panel) = north_angle_label_rect(points, north_angle) else {
+        return false;
+    };
+    point.x >= panel.x
+        && point.x <= panel.x + panel.width
+        && point.y >= panel.y
+        && point.y <= panel.y + panel.height
+}
+
 fn draw_bearing_arc(
     pixmap: &mut Pixmap,
     center: Point,
@@ -653,9 +731,19 @@ fn north_arrow_tip(vertex: Point, north_angle: f32) -> Point {
     point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH)
 }
 
+fn north_text_center(vertex: Point, north_angle: f32) -> Point {
+    point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH + 15.0)
+}
+
 fn north_lock_center(vertex: Point, north_angle: f32) -> Point {
-    let shaft = point_from_polar(vertex, north_angle, NORTH_LOCK_ALONG);
-    point_from_polar(shaft, north_angle + PI * 0.5, NORTH_LOCK_SIDE)
+    // The North lock stays immediately to the screen-right of the upright N,
+    // regardless of the arrow direction.
+    let n_center = north_text_center(vertex, north_angle);
+    let layout = layout_text("N", NORTH_TEXT_SIZE);
+    Point {
+        x: n_center.x + layout.width * 0.5 + NORTH_LOCK_GAP + LOCK_PANEL_SIZE * 0.5,
+        y: n_center.y,
+    }
 }
 
 fn in_north_lock_button(point: Point, vertex: Point, north_angle: f32) -> bool {
@@ -716,7 +804,7 @@ fn draw_north_overlay(
     stroke_segment(pixmap, arrow_tip, left, 1.55, line_color);
     stroke_segment(pixmap, arrow_tip, right, 1.55, line_color);
 
-    let n_center = point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH + 15.0);
+    let n_center = north_text_center(vertex, north_angle);
     draw_centered_text(
         pixmap,
         "N",
@@ -734,6 +822,7 @@ fn draw_north_overlay(
         pixmap,
         north_lock_center(vertex, north_angle),
         north_locked,
+        false,
         Color::from_rgba8(35, 112, 225, 255),
         open_color,
     );
@@ -777,7 +866,7 @@ fn north_overlay_bounds(
 ) -> ContentBounds {
     let vertex = points[1];
     let arrow_tip = north_arrow_tip(vertex, north_angle);
-    let n_center = point_from_polar(vertex, north_angle, NORTH_ARROW_LENGTH + 15.0);
+    let n_center = north_text_center(vertex, north_angle);
     let lock = north_lock_center(vertex, north_angle);
     let mut bounds = ContentBounds {
         min_x: vertex.x.min(arrow_tip.x).min(n_center.x).min(lock.x) - 18.0,
@@ -815,9 +904,15 @@ fn draw_lock_at(
     pixmap: &mut Pixmap,
     center: Point,
     locked: bool,
+    pinned: bool,
     locked_color: Color,
     open_color: Color,
 ) {
+    let panel_color = if pinned {
+        Color::from_rgba8(255, 235, 120, 205)
+    } else {
+        Color::from_rgba8(255, 255, 255, 155)
+    };
     fill_rounded_rect(
         pixmap,
         center.x - LOCK_PANEL_SIZE * 0.5,
@@ -825,10 +920,17 @@ fn draw_lock_at(
         LOCK_PANEL_SIZE,
         LOCK_PANEL_SIZE,
         LOCK_PANEL_RADIUS,
-        Color::from_rgba8(255, 255, 255, 155),
+        panel_color,
     );
 
-    let icon_color = if locked { locked_color } else { open_color };
+    let effective_locked = locked || pinned;
+    let icon_color = if pinned {
+        Color::from_rgba8(245, 190, 18, 255)
+    } else if locked {
+        locked_color
+    } else {
+        open_color
+    };
 
     if let Some(body) = Rect::from_xywh(center.x - 3.0, center.y - 0.5, 6.0, 5.0) {
         let mut paint = Paint::default();
@@ -836,7 +938,7 @@ fn draw_lock_at(
         pixmap.fill_rect(body, &paint, Transform::identity(), None);
     }
 
-    let right_x = if locked { center.x + 2.5 } else { center.x + 4.0 };
+    let right_x = if effective_locked { center.x + 2.5 } else { center.x + 4.0 };
     let mut builder = PathBuilder::new();
     builder.move_to(center.x - 2.5, center.y - 0.5);
     builder.line_to(center.x - 2.5, center.y - 3.0);
@@ -848,7 +950,7 @@ fn draw_lock_at(
         right_x,
         center.y - 3.0,
     );
-    if locked {
+    if effective_locked {
         builder.line_to(right_x, center.y - 0.5);
     }
     if let Some(path) = builder.finish() {
@@ -882,7 +984,13 @@ fn draw_lock_at(
     );
 }
 
-fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverted: bool) {
+fn draw_lock_icon(
+    pixmap: &mut Pixmap,
+    points: [Point; 3],
+    locked: bool,
+    pinned: bool,
+    inverted: bool,
+) {
     let open_color = if inverted {
         Color::from_rgba8(245, 245, 245, 245)
     } else {
@@ -892,6 +1000,7 @@ fn draw_lock_icon(pixmap: &mut Pixmap, points: [Point; 3], locked: bool, inverte
         pixmap,
         lock_center(points),
         locked,
+        pinned,
         Color::from_rgba8(32, 105, 218, 255),
         open_color,
     );
@@ -901,6 +1010,8 @@ fn draw_red_lock_icons(
     pixmap: &mut Pixmap,
     points: [Point; 3],
     locked_index: Option<usize>,
+    left_pinned: bool,
+    right_pinned: bool,
     inverted: bool,
 ) {
     let open_color = if inverted {
@@ -913,6 +1024,7 @@ fn draw_red_lock_icons(
             pixmap,
             red_lock_center(points, index),
             locked_index == Some(index),
+            if index == 0 { left_pinned } else { right_pinned },
             Color::from_rgba8(224, 55, 55, 255),
             open_color,
         );
@@ -1366,19 +1478,22 @@ struct App {
     north_visible: bool,
     north_angle: f32,
     north_locked: bool,
+    blue_pinned: bool,
+    left_red_pinned: bool,
+    right_red_pinned: bool,
     distance_editor: Option<DistanceEditor>,
     last_distance_click: Option<(DistanceKind, Instant)>,
     last_plus_click: Option<Instant>,
     last_red_click: Option<(usize, Instant)>,
-    restored_window_pos: Option<(i32, i32)>,
     angle_wheel_accumulator: f32,
     rotation_wheel_accumulator: f32,
+    north_wheel_accumulator: f32,
 }
 
 impl App {
     fn new() -> Self {
         let saved = load_state();
-        Self {
+        let mut app = Self {
             window: None,
             points: saved.map(|state| state.points).unwrap_or_else(default_points),
             helper_point: saved.and_then(|state| state.helper_point),
@@ -1408,14 +1523,81 @@ impl App {
             north_visible: saved.map(|state| state.north_visible).unwrap_or(false),
             north_angle: saved.map(|state| state.north_angle).unwrap_or(NORTH_DEFAULT_ANGLE),
             north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
+            blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
+            left_red_pinned: saved.map(|state| state.left_red_pinned).unwrap_or(false),
+            right_red_pinned: saved.map(|state| state.right_red_pinned).unwrap_or(false),
             distance_editor: None,
             last_distance_click: None,
             last_plus_click: None,
             last_red_click: None,
-            restored_window_pos: saved.map(|state| (state.window_x, state.window_y)),
             angle_wheel_accumulator: 0.0,
             rotation_wheel_accumulator: 0.0,
+            north_wheel_accumulator: 0.0,
+        };
+        app.rebase_geometry_for_startup();
+        app
+    }
+
+    fn rebase_geometry_for_startup(&mut self) {
+        // Saved coordinates are local to the old overlay window. Rebase the
+        // entire construction around a stable local anchor before creating the
+        // new window, so stale off-screen window coordinates cannot strand it.
+        let anchor = Point { x: 320.0, y: 230.0 };
+        let vertex = self.points[1];
+        if !vertex.x.is_finite()
+            || !vertex.y.is_finite()
+            || self.points.iter().any(|point| !point.x.is_finite() || !point.y.is_finite())
+        {
+            self.points = default_points();
+            if self.helper_point.is_some() {
+                self.helper_point = Some(self.default_helper_point());
+            }
+            return;
         }
+        let dx = anchor.x - vertex.x;
+        let dy = anchor.y - vertex.y;
+        for point in &mut self.points {
+            point.x += dx;
+            point.y += dy;
+        }
+        if let Some(helper) = &mut self.helper_point {
+            helper.x += dx;
+            helper.y += dy;
+        }
+    }
+
+    fn red_point_pinned(&self, index: usize) -> bool {
+        match index {
+            0 => self.left_red_pinned,
+            2 => self.right_red_pinned,
+            _ => false,
+        }
+    }
+
+    fn any_red_pinned(&self) -> bool {
+        self.left_red_pinned || self.right_red_pinned
+    }
+
+    fn any_screen_pin(&self) -> bool {
+        self.blue_pinned || self.any_red_pinned()
+    }
+
+    fn toggle_blue_pin(&mut self) {
+        self.blue_pinned = !self.blue_pinned;
+        self.active_handle = None;
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn toggle_red_pin(&mut self, index: usize) {
+        match index {
+            0 => self.left_red_pinned = !self.left_red_pinned,
+            2 => self.right_red_pinned = !self.right_red_pinned,
+            _ => return,
+        }
+        self.active_handle = None;
+        self.save_state();
+        self.request_redraw();
     }
 
     fn current_signed_angle(&self) -> f32 {
@@ -1458,7 +1640,7 @@ impl App {
 
         // Two closed locks freeze the red system completely. A double click
         // must not rotate or rebuild it until one of the locks is opened.
-        if self.both_locks_closed() {
+        if self.both_locks_closed() || self.any_red_pinned() {
             return;
         }
 
@@ -1518,6 +1700,9 @@ impl App {
         if index != 0 && index != 2 {
             return;
         }
+        if self.red_point_pinned(index) {
+            return;
+        }
         self.red_locked_index = if self.red_locked_index == Some(index) {
             None
         } else {
@@ -1531,6 +1716,9 @@ impl App {
     }
 
     fn toggle_angle_lock(&mut self) {
+        if self.blue_pinned {
+            return;
+        }
         self.angle_locked = !self.angle_locked;
         if self.angle_locked {
             self.locked_signed_angle = self.current_signed_angle();
@@ -1641,7 +1829,7 @@ impl App {
             _ => 0u8,
         };
         let text = format!(
-            "7\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
+            "8\n{} {}\n{} {}\n{} {}\n{}\n{} {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{} {}\n",
             p[0].x,
             p[0].y,
             p[1].x,
@@ -1664,6 +1852,9 @@ impl App {
             u8::from(self.north_visible),
             self.north_angle,
             u8::from(self.north_locked),
+            u8::from(self.blue_pinned),
+            u8::from(self.left_red_pinned),
+            u8::from(self.right_red_pinned),
             window_x,
             window_y,
         );
@@ -1733,12 +1924,15 @@ impl App {
             &mut pixmap,
             self.points,
             self.angle_locked,
+            self.blue_pinned,
             self.inverted,
         );
         draw_red_lock_icons(
             &mut pixmap,
             self.points,
             self.red_locked_index,
+            self.left_red_pinned,
+            self.right_red_pinned,
             self.inverted,
         );
 
@@ -1853,6 +2047,9 @@ impl App {
     }
 
     fn set_shared_red_radius(&mut self, radius_pixels: f32) {
+        if self.any_red_pinned() {
+            return;
+        }
         let vertex = self.points[1];
         let radius = radius_pixels.clamp(HANDLE_RADIUS + 8.0, MAX_LINE_LEN);
         let left_angle = vector_angle(vertex, self.points[0]);
@@ -1922,7 +2119,7 @@ impl App {
     }
 
     fn adjust_angle_by_degrees(&mut self, delta_deg: f32) {
-        if self.both_locks_closed() {
+        if self.both_locks_closed() || self.any_red_pinned() {
             return;
         }
         let vertex = self.points[1];
@@ -1948,7 +2145,7 @@ impl App {
     }
 
     fn rotate_red_system_by_degrees(&mut self, visual_degrees: f32) {
-        if self.both_locks_closed() {
+        if self.both_locks_closed() || self.any_red_pinned() {
             return;
         }
         let vertex = self.points[1];
@@ -1971,8 +2168,13 @@ impl App {
         if index != 0 && index != 2 {
             return;
         }
-        let pivot = self.points[index];
         let other = if index == 0 { 2 } else { 0 };
+        // The selected red point is the pivot and may itself be screen-pinned.
+        // The operation is blocked if it would move another pinned point.
+        if self.blue_pinned || self.red_point_pinned(other) {
+            return;
+        }
+        let pivot = self.points[index];
         let delta = visual_degrees.to_radians();
 
         for moving_index in [1usize, other] {
@@ -1981,6 +2183,24 @@ impl App {
             self.points[moving_index] = point_from_polar(pivot, angle, radius);
         }
         self.rotate_north_if_unlocked(delta);
+    }
+
+    fn center_blue_on_current_monitor(&self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let Some(monitor) = window.current_monitor() else {
+            return;
+        };
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let screen_center_x = monitor_position.x + monitor_size.width as i32 / 2;
+        let screen_center_y = monitor_position.y + monitor_size.height as i32 / 2;
+        let blue = self.points[1];
+        window.set_outer_position(PhysicalPosition::new(
+            screen_center_x - blue.x.round() as i32,
+            screen_center_y - blue.y.round() as i32,
+        ));
     }
 
     fn wheel_units(delta: MouseScrollDelta) -> f32 {
@@ -2009,15 +2229,13 @@ impl ApplicationHandler for App {
                 )
                 .expect("create window"),
         );
-        if let Some((x, y)) = self.restored_window_pos.take() {
-            window.set_outer_position(PhysicalPosition::new(x, y));
-        }
         let hwnd = hwnd_from_window(&window);
         unsafe {
             configure_overlay(hwnd);
         }
         self.window = Some(window);
         self.fit_window_to_content();
+        self.center_blue_on_current_monitor();
         self.redraw();
     }
 
@@ -2128,6 +2346,19 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                if button == MouseButton::Middle && state == ElementState::Pressed {
+                    if let Some(pos) = self.cursor_pos {
+                        if let Some(index) = in_red_lock_button(pos, self.points) {
+                            self.toggle_red_pin(index);
+                            return;
+                        }
+                        if in_lock_button(pos, self.points) {
+                            self.toggle_blue_pin();
+                            return;
+                        }
+                    }
+                    return;
+                }
                 if button != MouseButton::Left {
                     return;
                 }
@@ -2172,6 +2403,10 @@ impl ApplicationHandler for App {
                             self.last_plus_click = None;
 
                             if let Some(index) = red_point_at(pos, self.points) {
+                                if self.red_point_pinned(index) {
+                                    self.active_handle = None;
+                                    return;
+                                }
                                 let now = Instant::now();
                                 let is_double = self
                                     .last_red_click
@@ -2224,7 +2459,7 @@ impl ApplicationHandler for App {
                                 return;
                             }
                             self.active_handle = self.hit_test(pos.x, pos.y);
-                            if self.active_handle.is_none() {
+                            if self.active_handle.is_none() && !self.any_screen_pin() {
                                 let _ = window.drag_window();
                             }
                         }
@@ -2244,6 +2479,33 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let wheel_units = Self::wheel_units(delta);
+
+                if self.north_visible
+                    && self.bisector_visible
+                    && in_north_angle_label(cursor, self.points, self.north_angle)
+                {
+                    self.angle_wheel_accumulator = 0.0;
+                    self.rotation_wheel_accumulator = 0.0;
+                    if self.north_locked {
+                        self.north_wheel_accumulator = 0.0;
+                        return;
+                    }
+                    self.north_wheel_accumulator += wheel_units;
+                    let whole_steps = self.north_wheel_accumulator.trunc() as i32;
+                    if whole_steps != 0 {
+                        self.north_wheel_accumulator -= whole_steps as f32;
+                        // Wheel up rotates North counter-clockwise; wheel down clockwise.
+                        self.north_angle = normalize_signed_angle(
+                            self.north_angle - (whole_steps as f32).to_radians(),
+                        );
+                        self.fit_window_to_content();
+                        self.save_state();
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
+                self.north_wheel_accumulator = 0.0;
 
                 if self.distance_panel_at(cursor).is_some() {
                     return;
@@ -2320,6 +2582,7 @@ impl ApplicationHandler for App {
 
                 self.angle_wheel_accumulator = 0.0;
                 self.rotation_wheel_accumulator = 0.0;
+                self.north_wheel_accumulator = 0.0;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some(Point {
@@ -2369,6 +2632,9 @@ impl App {
                 Point { x: w * 0.50, y: h * 0.55 },
                 Point { x: w * 0.78, y: h * 0.68 },
             ];
+            self.blue_pinned = false;
+            self.left_red_pinned = false;
+            self.right_red_pinned = false;
             if self.helper_point.is_some() {
                 self.helper_point = Some(self.default_helper_point());
             }
@@ -2509,6 +2775,9 @@ impl App {
         }
 
         if index == 1 {
+            if self.blue_pinned {
+                return;
+            }
             if let Some(red_index) = self.red_locked_index {
                 if !self.angle_locked {
                     // With only a red lock closed, the red point becomes the
@@ -2518,13 +2787,16 @@ impl App {
                     let old_vertex = self.points[1];
                     let target_radius = vector_length(pivot, target);
                     if target_radius >= EPSILON {
+                        let other_index = if red_index == 0 { 2 } else { 0 };
+                        if self.red_point_pinned(other_index) {
+                            return;
+                        }
                         let old_angle = vector_angle(pivot, old_vertex);
                         let new_angle = vector_angle(pivot, target);
                         let delta = normalize_signed_angle(new_angle - old_angle);
                         let blue_radius = vector_length(pivot, old_vertex);
                         self.points[1] = point_from_polar(pivot, new_angle, blue_radius);
 
-                        let other_index = if red_index == 0 { 2 } else { 0 };
                         let other_angle = vector_angle(pivot, self.points[other_index]) + delta;
                         let other_radius = vector_length(pivot, self.points[other_index]);
                         self.points[other_index] =
@@ -2536,6 +2808,10 @@ impl App {
             }
 
             // Normal blue-point movement translates the complete construction.
+            // A yellow-pinned red point must remain at its absolute screen position.
+            if self.any_red_pinned() {
+                return;
+            }
             let old_vertex = self.points[1];
             let a_off = (
                 self.points[0].x - old_vertex.x,
@@ -2581,6 +2857,10 @@ impl App {
             if vector_length(vertex, moved) >= EPSILON {
                 self.helper_point = Some(moved);
             }
+            return;
+        }
+
+        if self.any_red_pinned() {
             return;
         }
 
@@ -2653,7 +2933,10 @@ impl App {
         self.points
             .iter()
             .enumerate()
-            .find(|(_, point)| {
+            .find(|(index, point)| {
+                if (*index == 1 && self.blue_pinned) || self.red_point_pinned(*index) {
+                    return false;
+                }
                 let dx = point.x - x;
                 let dy = point.y - y;
                 dx * dx + dy * dy <= hit_radius * hit_radius
