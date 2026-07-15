@@ -397,6 +397,7 @@ pub fn render_angle_measure(
     height: u32,
     points: [Point; 3],
     inverted: bool,
+    show_angle_label: bool,
 ) -> Pixmap {
     let mut pixmap = Pixmap::new(width, height).expect("pixmap allocation");
     pixmap.fill(Color::TRANSPARENT);
@@ -419,18 +420,20 @@ pub fn render_angle_measure(
         Color::from_rgba8(70, 120, 255, 240),
     );
 
-    let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
-    let panel = label_panel_rect(points);
-    let cx = panel.x + panel.width * 0.5;
-    let cy = panel.y + panel.height * 0.5;
-    draw_text_panel(
-        &mut pixmap,
-        &label,
-        cx,
-        cy,
-        Color::from_rgba8(255, 255, 255, 148),
-        Color::from_rgba8(18, 18, 18, 248),
-    );
+    if show_angle_label {
+        let label = format!("{}°", angle_between(a, vertex, b).round() as i32);
+        let panel = label_panel_rect(points);
+        let cx = panel.x + panel.width * 0.5;
+        let cy = panel.y + panel.height * 0.5;
+        draw_text_panel(
+            &mut pixmap,
+            &label,
+            cx,
+            cy,
+            Color::from_rgba8(255, 255, 255, 148),
+            Color::from_rgba8(18, 18, 18, 248),
+        );
+    }
 
     pixmap
 }

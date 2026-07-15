@@ -92,6 +92,18 @@ struct SavedState {
     window_y: i32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct HiddenAnglePanels {
+    main: bool,
+    north: bool,
+    course: bool,
+    helper_left: bool,
+    helper_right: bool,
+    helper_yellow: bool,
+    helper_delta: bool,
+}
+
+
 fn default_points() -> [Point; 3] {
     [
         Point { x: 140.0, y: 280.0 },
@@ -830,6 +842,7 @@ fn draw_north_overlay(
     inverted: bool,
     north_angle: f32,
     north_locked: bool,
+    show_angle_label: bool,
 ) {
     let vertex = points[1];
     let line_color = foreground_line_color(inverted);
@@ -895,16 +908,18 @@ fn draw_north_overlay(
         arc_color,
     );
 
-    let angle_text = format!("{}°", bearing_degrees(sweep));
-    let label_center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
-    draw_text_panel(
-        pixmap,
-        &angle_text,
-        label_center.x,
-        label_center.y,
-        Color::from_rgba8(218, 233, 255, 188),
-        Color::from_rgba8(28, 87, 190, 252),
-    );
+    if show_angle_label {
+        let angle_text = format!("{}°", bearing_degrees(sweep));
+        let label_center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+        draw_text_panel(
+            pixmap,
+            &angle_text,
+            label_center.x,
+            label_center.y,
+            Color::from_rgba8(218, 233, 255, 188),
+            Color::from_rgba8(28, 87, 190, 252),
+        );
+    }
 }
 
 fn north_overlay_bounds(
@@ -980,22 +995,30 @@ fn in_course_angle_label(point: Point, vertex: Point, helper: Point, north_angle
         && point.y <= panel.y + panel.height
 }
 
-fn draw_course_overlay(pixmap: &mut Pixmap, vertex: Point, helper: Point, north_angle: f32) {
+fn draw_course_overlay(
+    pixmap: &mut Pixmap,
+    vertex: Point,
+    helper: Point,
+    north_angle: f32,
+    show_angle_label: bool,
+) {
     let Some((sweep, mid_angle, radius)) = course_arc_geometry(vertex, helper, north_angle) else {
         return;
     };
     let arc_color = Color::from_rgba8(48, 205, 88, 235);
     draw_bearing_arc(pixmap, vertex, radius, north_angle, sweep, 1.65, arc_color);
-    let angle_text = format!("{}°", bearing_degrees(sweep));
-    let label_center = point_from_polar(vertex, mid_angle, radius + COURSE_LABEL_OFFSET);
-    draw_text_panel(
-        pixmap,
-        &angle_text,
-        label_center.x,
-        label_center.y,
-        Color::from_rgba8(225, 255, 225, 188),
-        Color::from_rgba8(22, 132, 42, 252),
-    );
+    if show_angle_label {
+        let angle_text = format!("{}°", bearing_degrees(sweep));
+        let label_center = point_from_polar(vertex, mid_angle, radius + COURSE_LABEL_OFFSET);
+        draw_text_panel(
+            pixmap,
+            &angle_text,
+            label_center.x,
+            label_center.y,
+            Color::from_rgba8(225, 255, 225, 188),
+            Color::from_rgba8(22, 132, 42, 252),
+        );
+    }
 }
 
 fn course_overlay_bounds(vertex: Point, helper: Point, north_angle: f32) -> ContentBounds {
@@ -1346,6 +1369,49 @@ fn helper_bisector_arc_geometry(
     ))
 }
 
+fn point_in_panel(point: Point, panel: PanelRect) -> bool {
+    point.x >= panel.x
+        && point.x <= panel.x + panel.width
+        && point.y >= panel.y
+        && point.y <= panel.y + panel.height
+}
+
+fn helper_angle_panel_rects(points: [Point; 3], helper: Point) -> (PanelRect, PanelRect) {
+    let vertex = points[1];
+    let (_, _, _, mid_left, mid_right, radius) = helper_arc_geometry(points, helper);
+    let left_text = format!(
+        "{}°",
+        angle_between(points[0], vertex, helper).round() as i32
+    );
+    let right_text = format!(
+        "{}°",
+        angle_between(helper, vertex, points[2]).round() as i32
+    );
+    let left_center = point_from_polar(vertex, mid_left, radius);
+    let right_center = point_from_polar(vertex, mid_right, radius);
+    (
+        text_panel_rect(&left_text, left_center.x, left_center.y),
+        text_panel_rect(&right_text, right_center.x, right_center.y),
+    )
+}
+
+fn helper_yellow_panel_rect(points: [Point; 3], helper: Point) -> Option<PanelRect> {
+    let vertex = points[1];
+    let (_, _, mid_angle, radius, delta) = helper_bisector_arc_geometry(points, helper)?;
+    let text = format!("{}°", delta.to_degrees().round() as i32);
+    let center = point_from_polar(vertex, mid_angle, radius);
+    Some(text_panel_rect(&text, center.x, center.y))
+}
+
+fn helper_delta_panel_rect(points: [Point; 3], helper: Point) -> Option<PanelRect> {
+    let vertex = points[1];
+    let outside = helper_outside_angle(points, helper)?;
+    let (_, _, _, _, _, radius) = helper_arc_geometry(points, helper);
+    let text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
+    let center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
+    Some(text_panel_rect(&text, center.x, center.y))
+}
+
 fn include_point_in_bounds(bounds: &mut ContentBounds, point: Point, padding: f32) {
     bounds.min_x = bounds.min_x.min(point.x - padding);
     bounds.min_y = bounds.min_y.min(point.y - padding);
@@ -1393,6 +1459,7 @@ fn helper_overlay_bounds(
     points: [Point; 3],
     helper: Point,
     plus_degrees_visible: bool,
+    bisector_visible: bool,
 ) -> ContentBounds {
     let vertex = points[1];
     let mut bounds = ContentBounds {
@@ -1408,23 +1475,25 @@ fn helper_overlay_bounds(
     if plus_degrees_visible {
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
-        if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
-            helper_bisector_arc_geometry(points, helper)
-        {
-            include_arc_in_bounds(
-                &mut bounds,
-                vertex,
-                yellow_radius - 2.0,
-                bisector_angle,
-                helper_angle,
-            );
-            include_arc_in_bounds(
-                &mut bounds,
-                vertex,
-                yellow_radius + 2.0,
-                bisector_angle,
-                helper_angle,
-            );
+        if bisector_visible {
+            if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
+                helper_bisector_arc_geometry(points, helper)
+            {
+                include_arc_in_bounds(
+                    &mut bounds,
+                    vertex,
+                    yellow_radius - 2.0,
+                    bisector_angle,
+                    helper_angle,
+                );
+                include_arc_in_bounds(
+                    &mut bounds,
+                    vertex,
+                    yellow_radius + 2.0,
+                    bisector_angle,
+                    helper_angle,
+                );
+            }
         }
     } else if let Some(outside) = outside {
         include_arc_in_bounds(
@@ -1468,16 +1537,18 @@ fn helper_overlay_bounds(
             bounds.max_y = bounds.max_y.max(panel.y + panel.height);
         }
 
-        if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
-            helper_bisector_arc_geometry(points, helper)
-        {
-            let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
-            let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
-            let panel = text_panel_rect(&yellow_text, yellow_center.x, yellow_center.y);
-            bounds.min_x = bounds.min_x.min(panel.x);
-            bounds.min_y = bounds.min_y.min(panel.y);
-            bounds.max_x = bounds.max_x.max(panel.x + panel.width);
-            bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+        if bisector_visible {
+            if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
+                helper_bisector_arc_geometry(points, helper)
+            {
+                let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
+                let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
+                let panel = text_panel_rect(&yellow_text, yellow_center.x, yellow_center.y);
+                bounds.min_x = bounds.min_x.min(panel.x);
+                bounds.min_y = bounds.min_y.min(panel.y);
+                bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+                bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+            }
         }
     }
 
@@ -1535,6 +1606,8 @@ fn draw_helper_overlay(
     points: [Point; 3],
     helper: Point,
     plus_degrees_visible: bool,
+    bisector_visible: bool,
+    hidden_panels: HiddenAnglePanels,
     inverted: bool,
 ) {
     let vertex = points[1];
@@ -1569,30 +1642,32 @@ fn draw_helper_overlay(
         draw_arc(pixmap, vertex, radius, angle_a, angle_h, 1.5, arc_color);
         draw_arc(pixmap, vertex, radius, angle_h, angle_b, 1.5, arc_color);
 
-        if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
-            helper_bisector_arc_geometry(points, helper)
-        {
-            let yellow = Color::from_rgba8(235, 190, 34, 238);
-            // A pair of close concentric strokes makes the new measurement
-            // visually distinct without making it heavy.
-            draw_arc(
-                pixmap,
-                vertex,
-                yellow_radius - 2.0,
-                bisector_angle,
-                helper_angle,
-                1.15,
-                yellow,
-            );
-            draw_arc(
-                pixmap,
-                vertex,
-                yellow_radius + 2.0,
-                bisector_angle,
-                helper_angle,
-                1.15,
-                yellow,
-            );
+        if bisector_visible {
+            if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
+                helper_bisector_arc_geometry(points, helper)
+            {
+                let yellow = Color::from_rgba8(235, 190, 34, 238);
+                // A pair of close concentric strokes makes the new measurement
+                // visually distinct without making it heavy.
+                draw_arc(
+                    pixmap,
+                    vertex,
+                    yellow_radius - 2.0,
+                    bisector_angle,
+                    helper_angle,
+                    1.15,
+                    yellow,
+                );
+                draw_arc(
+                    pixmap,
+                    vertex,
+                    yellow_radius + 2.0,
+                    bisector_angle,
+                    helper_angle,
+                    1.15,
+                    yellow,
+                );
+            }
         }
     } else if let Some(outside) = outside {
         // When “Градуси +” is off, ordinary green helper arcs are hidden.
@@ -1624,51 +1699,59 @@ fn draw_helper_overlay(
             Color::from_rgba8(18, 18, 18, 248)
         };
 
-        draw_text_panel(
-            pixmap,
-            &text1,
-            center1.x,
-            center1.y,
-            panel_background,
-            panel_text,
-        );
-        draw_text_panel(
-            pixmap,
-            &text2,
-            center2.x,
-            center2.y,
-            panel_background,
-            panel_text,
-        );
-
-        if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
-            helper_bisector_arc_geometry(points, helper)
-        {
-            let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
-            let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
+        if !hidden_panels.helper_left {
             draw_text_panel(
                 pixmap,
-                &yellow_text,
-                yellow_center.x,
-                yellow_center.y,
-                Color::from_rgba8(255, 244, 178, 185),
-                Color::from_rgba8(112, 82, 0, 250),
+                &text1,
+                center1.x,
+                center1.y,
+                panel_background,
+                panel_text,
             );
+        }
+        if !hidden_panels.helper_right {
+            draw_text_panel(
+                pixmap,
+                &text2,
+                center2.x,
+                center2.y,
+                panel_background,
+                panel_text,
+            );
+        }
+
+        if bisector_visible && !hidden_panels.helper_yellow {
+            if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
+                helper_bisector_arc_geometry(points, helper)
+            {
+                let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
+                let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
+                draw_text_panel(
+                    pixmap,
+                    &yellow_text,
+                    yellow_center.x,
+                    yellow_center.y,
+                    Color::from_rgba8(255, 244, 178, 185),
+                    Color::from_rgba8(112, 82, 0, 250),
+                );
+            }
         }
     }
 
     if let Some(outside) = outside {
         // The additional panel reports only the angular overrun beyond the sector.
-        let delta_text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
-        let delta_center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
-        draw_text_panel(
-            pixmap,
-            &delta_text,
-            delta_center.x,
-            delta_center.y,
-            Color::from_rgba8(255, 205, 205, 205),
-            Color::from_rgba8(165, 24, 24, 252),
-        );
+        if !hidden_panels.helper_delta {
+            let delta_text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
+            let delta_center = point_from_polar(vertex, outside.mid_angle, radius + 28.0);
+            draw_text_panel(
+                pixmap,
+                &delta_text,
+                delta_center.x,
+                delta_center.y,
+                Color::from_rgba8(255, 205, 205, 205),
+                Color::from_rgba8(165, 24, 24, 252),
+            );
+        }
     }
 
     draw_plus_handle(pixmap, helper);
@@ -1726,6 +1809,7 @@ struct App {
     north_angle: f32,
     north_locked: bool,
     course_visible: bool,
+    hidden_angle_panels: HiddenAnglePanels,
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
@@ -1773,6 +1857,7 @@ impl App {
             north_angle: saved.map(|state| state.north_angle).unwrap_or(NORTH_DEFAULT_ANGLE),
             north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
             course_visible: saved.map(|state| state.course_visible).unwrap_or(false),
+            hidden_angle_panels: HiddenAnglePanels::default(),
             blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
             left_red_pinned: saved.map(|state| state.left_red_pinned).unwrap_or(false),
             right_red_pinned: saved.map(|state| state.right_red_pinned).unwrap_or(false),
@@ -1993,6 +2078,80 @@ impl App {
         self.request_redraw();
     }
 
+    fn reset_helper_angle_panels(&mut self) {
+        self.hidden_angle_panels.helper_left = false;
+        self.hidden_angle_panels.helper_right = false;
+        self.hidden_angle_panels.helper_yellow = false;
+        self.hidden_angle_panels.helper_delta = false;
+    }
+
+    fn hide_angle_panel_at(&mut self, point: Point) -> bool {
+        // Test in reverse drawing order so the visually topmost panel wins if
+        // two translucent labels overlap. This state is intentionally not
+        // persisted: restarting the app also restores every degree panel.
+        if let Some(helper) = self.helper_point {
+            if let Some(panel) = helper_delta_panel_rect(self.points, helper) {
+                if !self.hidden_angle_panels.helper_delta && point_in_panel(point, panel) {
+                    self.hidden_angle_panels.helper_delta = true;
+                    self.request_redraw();
+                    return true;
+                }
+            }
+
+            if self.plus_degrees_visible {
+                if self.bisector_visible && !self.hidden_angle_panels.helper_yellow {
+                    if let Some(panel) = helper_yellow_panel_rect(self.points, helper) {
+                        if point_in_panel(point, panel) {
+                            self.hidden_angle_panels.helper_yellow = true;
+                            self.request_redraw();
+                            return true;
+                        }
+                    }
+                }
+
+                let (left, right) = helper_angle_panel_rects(self.points, helper);
+                if !self.hidden_angle_panels.helper_right && point_in_panel(point, right) {
+                    self.hidden_angle_panels.helper_right = true;
+                    self.request_redraw();
+                    return true;
+                }
+                if !self.hidden_angle_panels.helper_left && point_in_panel(point, left) {
+                    self.hidden_angle_panels.helper_left = true;
+                    self.request_redraw();
+                    return true;
+                }
+            }
+
+            if self.course_visible
+                && self.north_visible
+                && !self.hidden_angle_panels.course
+                && in_course_angle_label(point, self.points[1], helper, self.north_angle)
+            {
+                self.hidden_angle_panels.course = true;
+                self.request_redraw();
+                return true;
+            }
+        }
+
+        if self.north_visible
+            && self.bisector_visible
+            && !self.hidden_angle_panels.north
+            && in_north_angle_label(point, self.points, self.north_angle)
+        {
+            self.hidden_angle_panels.north = true;
+            self.request_redraw();
+            return true;
+        }
+
+        if !self.hidden_angle_panels.main && point_in_panel(point, label_panel_rect(self.points)) {
+            self.hidden_angle_panels.main = true;
+            self.request_redraw();
+            return true;
+        }
+
+        false
+    }
+
     fn rotate_north_if_unlocked(&mut self, delta_radians: f32) {
         if self.north_visible && !self.north_locked {
             self.north_angle = normalize_signed_angle(self.north_angle + delta_radians);
@@ -2009,6 +2168,8 @@ impl App {
     }
 
     fn toggle_helper_point(&mut self) {
+        self.reset_helper_angle_panels();
+        self.hidden_angle_panels.course = false;
         self.helper_point = if self.helper_point.is_some() {
             self.distance_visible = false;
             self.distance_editor = None;
@@ -2046,12 +2207,19 @@ impl App {
 
     fn toggle_feature(&mut self, command: u32) {
         match command {
-            MENU_BISECTOR => self.bisector_visible = !self.bisector_visible,
+            MENU_BISECTOR => {
+                self.bisector_visible = !self.bisector_visible;
+                // Both the North/bisector label and the yellow helper label
+                // belong to the bisector feature, so toggling it restores them.
+                self.hidden_angle_panels.north = false;
+                self.hidden_angle_panels.helper_yellow = false;
+            }
             MENU_PLUS => {
                 self.toggle_helper_point();
                 return;
             }
             MENU_COURSE_PLUS => {
+                self.hidden_angle_panels.course = false;
                 self.course_visible = !self.course_visible;
                 if self.course_visible {
                     if self.helper_point.is_none() {
@@ -2060,7 +2228,10 @@ impl App {
                     self.north_visible = true;
                 }
             }
-            MENU_PLUS_DEGREES => self.plus_degrees_visible = !self.plus_degrees_visible,
+            MENU_PLUS_DEGREES => {
+                self.reset_helper_angle_panels();
+                self.plus_degrees_visible = !self.plus_degrees_visible;
+            }
             MENU_INVERSION => self.inverted = !self.inverted,
             MENU_HYPOTENUSE => self.hypotenuse_visible = !self.hypotenuse_visible,
             MENU_FRONT_PLUS => self.front_plus_visible = !self.front_plus_visible,
@@ -2069,6 +2240,8 @@ impl App {
                 return;
             }
             MENU_NORTH_PLUS => {
+                self.hidden_angle_panels.north = false;
+                self.hidden_angle_panels.course = false;
                 self.north_visible = !self.north_visible;
                 if !self.north_visible {
                     self.course_visible = false;
@@ -2156,7 +2329,13 @@ impl App {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
-        let mut pixmap = draw::render_angle_measure(width, height, self.points, self.inverted);
+        let mut pixmap = draw::render_angle_measure(
+            width,
+            height,
+            self.points,
+            self.inverted,
+            !self.hidden_angle_panels.main,
+        );
 
         if self.hypotenuse_visible {
             draw_hypotenuse(&mut pixmap, self.points);
@@ -2177,12 +2356,19 @@ impl App {
                 self.inverted,
                 self.north_angle,
                 self.north_locked,
+                !self.hidden_angle_panels.north,
             );
         }
         if self.course_visible {
             if let Some(helper) = self.helper_point {
                 if self.north_visible {
-                    draw_course_overlay(&mut pixmap, self.points[1], helper, self.north_angle);
+                    draw_course_overlay(
+                        &mut pixmap,
+                        self.points[1],
+                        helper,
+                        self.north_angle,
+                        !self.hidden_angle_panels.course,
+                    );
                 }
             }
         }
@@ -2192,6 +2378,8 @@ impl App {
                 self.points,
                 helper,
                 self.plus_degrees_visible,
+                self.bisector_visible,
+                self.hidden_angle_panels,
                 self.inverted,
             );
             if self.distance_visible && self.meters_per_pixel > 0.0 {
@@ -2635,6 +2823,9 @@ impl ApplicationHandler for App {
                 }
                 if button == MouseButton::Middle && state == ElementState::Pressed {
                     if let Some(pos) = self.cursor_pos {
+                        if self.hide_angle_panel_at(pos) {
+                            return;
+                        }
                         if let Some(index) = in_red_lock_button(pos, self.points) {
                             self.toggle_red_pin(index);
                             return;
@@ -2769,6 +2960,7 @@ impl ApplicationHandler for App {
 
                 if self.course_visible
                     && self.north_visible
+                    && !self.hidden_angle_panels.course
                     && self.helper_point.is_some()
                     && in_course_angle_label(cursor, self.points[1], self.helper_point.unwrap(), self.north_angle)
                 {
@@ -2790,6 +2982,7 @@ impl ApplicationHandler for App {
 
                 if self.north_visible
                     && self.bisector_visible
+                    && !self.hidden_angle_panels.north
                     && in_north_angle_label(cursor, self.points, self.north_angle)
                 {
                     self.angle_wheel_accumulator = 0.0;
@@ -2875,7 +3068,7 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if in_angle_label(cursor, self.points) {
+                if !self.hidden_angle_panels.main && in_angle_label(cursor, self.points) {
                     self.rotation_wheel_accumulator = 0.0;
                     self.angle_wheel_accumulator += wheel_units;
                     let whole_steps = self.angle_wheel_accumulator.trunc() as i32;
@@ -2979,7 +3172,12 @@ impl App {
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
                 bounds,
-                helper_overlay_bounds(self.points, helper, self.plus_degrees_visible),
+                helper_overlay_bounds(
+                    self.points,
+                    helper,
+                    self.plus_degrees_visible,
+                    self.bisector_visible,
+                ),
             );
             if self.distance_visible && self.meters_per_pixel > 0.0 {
                 bounds = merge_bounds(
@@ -3052,7 +3250,12 @@ impl App {
         if let Some(helper) = self.helper_point {
             bounds = merge_bounds(
                 bounds,
-                helper_overlay_bounds(self.points, helper, self.plus_degrees_visible),
+                helper_overlay_bounds(
+                    self.points,
+                    helper,
+                    self.plus_degrees_visible,
+                    self.bisector_visible,
+                ),
             );
             if self.distance_visible && self.meters_per_pixel > 0.0 {
                 bounds = merge_bounds(
