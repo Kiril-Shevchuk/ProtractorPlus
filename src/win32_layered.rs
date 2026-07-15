@@ -29,6 +29,8 @@ pub const MENU_PLUS_DEGREES: u32 = 16;
 pub const MENU_FRONT_PLUS: u32 = 17;
 pub const MENU_DISTANCE_PLUS: u32 = 18;
 pub const MENU_XTK_PLUS: u32 = 19;
+pub const MENU_BOX_PLUS: u32 = 20;
+pub const MENU_DELETE_BOX_POINT: u32 = 50;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
@@ -42,6 +44,7 @@ pub struct ContextMenuState {
     pub xtk_plus: bool,
     pub distance_plus: bool,
     pub north_plus: bool,
+    pub box_plus: bool,
 }
 
 pub fn hwnd_from_window(window: &Window) -> HWND {
@@ -132,6 +135,7 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
     append_toggle_item(menu, MENU_PLUS_DEGREES, "Градуси +", state.plus_degrees);
     append_toggle_item(menu, MENU_FRONT_PLUS, "Фронт +", state.front_plus);
     append_toggle_item(menu, MENU_XTK_PLUS, "XTK +", state.xtk_plus);
+    append_toggle_item(menu, MENU_BOX_PLUS, "Коробка +", state.box_plus);
     append_toggle_item(menu, MENU_DISTANCE_PLUS, "Дистанція +", state.distance_plus);
 
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
@@ -149,6 +153,40 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
         MF_STRING,
         MENU_CLOSE as usize,
         PCWSTR(close.as_ptr()),
+    );
+
+    let mut point = POINT::default();
+    if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).is_err() {
+        let _ = DestroyMenu(menu);
+        return None;
+    }
+    let _ = SetForegroundWindow(hwnd);
+    let command = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        point.x,
+        point.y,
+        0,
+        hwnd,
+        None,
+    );
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+    let _ = DestroyMenu(menu);
+    if command.0 == 0 {
+        None
+    } else {
+        Some(command.0 as u32)
+    }
+}
+
+pub unsafe fn show_box_point_menu(hwnd: HWND) -> Option<u32> {
+    let menu: HMENU = CreatePopupMenu().ok()?;
+    let delete = wide("Видалити");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_BOX_POINT as usize,
+        PCWSTR(delete.as_ptr()),
     );
 
     let mut point = POINT::default();

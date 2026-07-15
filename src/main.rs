@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod box_overlay;
 mod distance;
 mod draw;
 mod icon;
@@ -16,8 +17,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use distance::{
-    distance_bounds, draw_distance_overlay, hit_test_distance_panel, meters_for_kind,
+    distance_bounds, distance_panels, draw_distance_overlay, hit_test_distance_panel, meters_for_kind,
     DistanceEditor, DistanceKind, HiddenDistancePanels,
+};
+use box_overlay::{
+    box_bounds, box_point_at, draw_box_geometry, draw_box_panels, is_close_target,
+    layout_box_panels, load_box_state, save_box_state, BoxPanelKind, BoxPanelLayout,
+    MAX_BOX_POINTS,
 };
 use draw::{
     angle_between, content_bounds, draw_arc, draw_plus_handle, draw_text_panel,
@@ -38,7 +44,8 @@ use crate::win32_layered::{
     present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
     MENU_COURSE_PLUS, MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS,
-    MENU_PLUS_DEGREES, MENU_XTK_PLUS,
+    MENU_PLUS_DEGREES, MENU_XTK_PLUS, MENU_BOX_PLUS, MENU_DELETE_BOX_POINT,
+    show_box_point_menu,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -242,6 +249,15 @@ fn settings_path() -> PathBuf {
             .join("settings.txt");
     }
     PathBuf::from("ProtractorPlus.settings.txt")
+}
+
+fn box_settings_path() -> PathBuf {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join("ProtractorPlus")
+            .join("box.txt");
+    }
+    PathBuf::from("ProtractorPlus.box.txt")
 }
 
 fn parse_next<T: FromStr>(values: &mut std::str::SplitWhitespace<'_>) -> Option<T> {
@@ -2221,6 +2237,11 @@ struct App {
     north_angle: f32,
     north_locked: bool,
     course_visible: bool,
+    box_visible: bool,
+    box_points: Vec<Point>,
+    box_closed: bool,
+    hidden_box_distance_panels: u16,
+    hidden_box_bearing_panels: u16,
     hidden_angle_panels: HiddenAnglePanels,
     hidden_distance_panels: HiddenDistancePanels,
     blue_pinned: bool,
@@ -2240,6 +2261,7 @@ struct App {
 impl App {
     fn new() -> Self {
         let saved = load_state();
+        let box_saved = load_box_state(&box_settings_path());
         let mut app = Self {
             window: None,
             splash_window: None,
@@ -2275,6 +2297,11 @@ impl App {
             north_angle: saved.map(|state| state.north_angle).unwrap_or(NORTH_DEFAULT_ANGLE),
             north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
             course_visible: saved.map(|state| state.course_visible).unwrap_or(false),
+            box_visible: box_saved.visible,
+            box_points: box_saved.points,
+            box_closed: box_saved.closed,
+            hidden_box_distance_panels: 0,
+            hidden_box_bearing_panels: 0,
             hidden_angle_panels: HiddenAnglePanels::default(),
             hidden_distance_panels: HiddenDistancePanels::default(),
             blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
@@ -2314,6 +2341,9 @@ impl App {
             if self.helper_point.is_some() {
                 self.helper_point = Some(self.default_helper_point());
             }
+            self.box_points.clear();
+            self.box_visible = false;
+            self.box_closed = false;
             return;
         }
         let dx = anchor.x - vertex.x;
@@ -2325,6 +2355,10 @@ impl App {
         if let Some(helper) = &mut self.helper_point {
             helper.x += dx;
             helper.y += dy;
+        }
+        for point in &mut self.box_points {
+            point.x += dx;
+            point.y += dy;
         }
     }
 
@@ -2496,6 +2530,126 @@ impl App {
             _ => return,
         }
         self.active_handle = None;
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn standard_distance_rects(&self, angle_rects: &[PanelRect]) -> Vec<PanelRect> {
+        if !self.distance_visible || self.meters_per_pixel <= 0.0 {
+            return Vec::new();
+        }
+        let Some(helper) = self.helper_point else {
+            return Vec::new();
+        };
+        distance_panels(
+            self.points,
+            helper,
+            self.meters_per_pixel,
+            self.hypotenuse_visible,
+            self.front_plus_visible,
+            self.xtk_visible,
+            self.distance_editor.as_ref(),
+            self.hidden_distance_panels,
+            angle_rects,
+        )
+        .into_iter()
+        .map(|panel| panel.rect)
+        .collect()
+    }
+
+    fn box_panel_layout_with_angle_rects(&self, angle_rects: &[PanelRect]) -> BoxPanelLayout {
+        if !self.box_visible || self.box_points.len() < 2 {
+            return BoxPanelLayout::default();
+        }
+        let mut avoid = angle_rects.to_vec();
+        avoid.extend(self.standard_distance_rects(angle_rects));
+        layout_box_panels(
+            &self.box_points,
+            self.box_closed,
+            self.meters_per_pixel,
+            self.north_angle,
+            self.distance_visible,
+            self.plus_degrees_visible,
+            self.hidden_box_distance_panels,
+            self.hidden_box_bearing_panels,
+            &avoid,
+        )
+    }
+
+    fn box_panel_layout(&self) -> BoxPanelLayout {
+        let angle_rects = self.angle_panel_layout().rects();
+        self.box_panel_layout_with_angle_rects(&angle_rects)
+    }
+
+    fn hide_box_panel_at(&mut self, point: Point) -> bool {
+        let Some(kind) = self.box_panel_layout().hit_test(point) else {
+            return false;
+        };
+        match kind {
+            BoxPanelKind::Distance(index) => {
+                self.hidden_box_distance_panels |= 1u16 << index;
+            }
+            BoxPanelKind::Bearing(index) => {
+                self.hidden_box_bearing_panels |= 1u16 << index;
+            }
+        }
+        self.fit_window_to_content();
+        self.request_redraw();
+        true
+    }
+
+    fn toggle_box_mode(&mut self) {
+        self.box_visible = !self.box_visible;
+        self.hidden_box_distance_panels = 0;
+        self.hidden_box_bearing_panels = 0;
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn add_or_close_box_point(&mut self, point: Point) -> bool {
+        if !self.box_visible || self.box_closed {
+            return false;
+        }
+        if is_close_target(point, &self.box_points) {
+            self.box_closed = true;
+            self.hidden_box_distance_panels = 0;
+            self.hidden_box_bearing_panels = 0;
+            self.fit_window_to_content();
+            self.save_state();
+            self.request_redraw();
+            return true;
+        }
+        if box_point_at(point, &self.box_points).is_some() {
+            return true;
+        }
+        if self.box_points.len() >= MAX_BOX_POINTS {
+            return true;
+        }
+        self.box_points.push(point);
+        self.hidden_box_distance_panels = 0;
+        self.hidden_box_bearing_panels = 0;
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+        true
+    }
+
+    fn delete_box_point(&mut self, index: usize) {
+        if index >= self.box_points.len() {
+            return;
+        }
+        self.box_points.remove(index);
+        if self.box_points.len() < 3 {
+            self.box_closed = false;
+        }
+        if self.box_points.is_empty() {
+            self.box_visible = false;
+            self.box_closed = false;
+        }
+        self.hidden_box_distance_panels = 0;
+        self.hidden_box_bearing_panels = 0;
+        self.fit_window_to_content();
         self.save_state();
         self.request_redraw();
     }
@@ -2955,6 +3109,7 @@ impl App {
 
     fn toggle_distance_mode(&mut self) {
         self.hidden_distance_panels.clear_all();
+        self.hidden_box_distance_panels = 0;
         if self.distance_visible {
             self.distance_visible = false;
             self.distance_editor = None;
@@ -3001,6 +3156,7 @@ impl App {
             }
             MENU_PLUS_DEGREES => {
                 self.reset_helper_angle_panels();
+                self.hidden_box_bearing_panels = 0;
                 self.plus_degrees_visible = !self.plus_degrees_visible;
             }
             MENU_INVERSION => self.inverted = !self.inverted,
@@ -3020,6 +3176,10 @@ impl App {
                 if self.xtk_visible && self.helper_point.is_none() {
                     self.helper_point = Some(self.default_helper_point());
                 }
+            }
+            MENU_BOX_PLUS => {
+                self.toggle_box_mode();
+                return;
             }
             MENU_DISTANCE_PLUS => {
                 self.toggle_distance_mode();
@@ -3052,6 +3212,7 @@ impl App {
             xtk_plus: self.xtk_visible,
             distance_plus: self.distance_visible,
             north_plus: self.north_visible,
+            box_plus: self.box_visible,
         }
     }
 
@@ -3104,6 +3265,12 @@ impl App {
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(path, text);
+        save_box_state(
+            &box_settings_path(),
+            self.box_visible,
+            self.box_closed,
+            &self.box_points,
+        );
     }
 
     fn redraw(&self) {
@@ -3120,6 +3287,7 @@ impl App {
         let height = size.height.max(1);
         let angle_layout = self.angle_panel_layout();
         let angle_rects = angle_layout.rects();
+        let box_layout = self.box_panel_layout_with_angle_rects(&angle_rects);
         let mut pixmap = draw::render_angle_measure(
             width,
             height,
@@ -3201,6 +3369,11 @@ impl App {
                 );
             }
             draw_helper_lock_icon(&mut pixmap, helper, self.helper_pinned, self.inverted);
+        }
+
+        if self.box_visible {
+            draw_box_geometry(&mut pixmap, &self.box_points, self.box_closed);
+            draw_box_panels(&mut pixmap, &box_layout);
         }
 
         // All degree panels are drawn from one collision-resolved layout so
@@ -3652,6 +3825,18 @@ impl ApplicationHandler for App {
                         self.commit_distance_edit();
                     }
                     let hwnd = hwnd_from_window(&window);
+                    if self.box_visible {
+                        if let Some(pos) = self.cursor_pos {
+                            if let Some(index) = box_point_at(pos, &self.box_points) {
+                                if unsafe { show_box_point_menu(hwnd) }
+                                    == Some(MENU_DELETE_BOX_POINT)
+                                {
+                                    self.delete_box_point(index);
+                                }
+                                return;
+                            }
+                        }
+                    }
                     if let Some(command) =
                         unsafe { show_context_menu(hwnd, self.context_menu_state()) }
                     {
@@ -3664,6 +3849,7 @@ impl ApplicationHandler for App {
                             | MENU_HYPOTENUSE
                             | MENU_FRONT_PLUS
                             | MENU_XTK_PLUS
+                            | MENU_BOX_PLUS
                             | MENU_DISTANCE_PLUS
                             | MENU_NORTH_PLUS => self.toggle_feature(command),
                             MENU_MINIMIZE => {
@@ -3683,6 +3869,9 @@ impl ApplicationHandler for App {
                 if button == MouseButton::Middle && state == ElementState::Pressed {
                     if let Some(pos) = self.cursor_pos {
                         if self.hide_distance_panel_at(pos) {
+                            return;
+                        }
+                        if self.hide_box_panel_at(pos) {
                             return;
                         }
                         if self.hide_angle_panel_at(pos) {
@@ -3809,7 +3998,22 @@ impl ApplicationHandler for App {
                                 return;
                             }
                             self.active_handle = self.hit_test(pos.x, pos.y);
-                            if self.active_handle.is_none() && !self.any_screen_pin() {
+                            if self.active_handle.is_some() {
+                                return;
+                            }
+                            let over_angle_panel = self
+                                .angle_panel_layout()
+                                .rects()
+                                .into_iter()
+                                .any(|panel| point_in_panel(pos, panel));
+                            let over_box_panel = self.box_panel_layout().hit_test(pos).is_some();
+                            if self.box_visible && !over_angle_panel && !over_box_panel {
+                                if self.add_or_close_box_point(pos) {
+                                    self.active_handle = None;
+                                    return;
+                                }
+                            }
+                            if !self.any_screen_pin() {
                                 let _ = window.drag_window();
                             }
                         }
@@ -4042,6 +4246,7 @@ impl App {
     fn calculated_content_bounds(&self) -> ContentBounds {
         let angle_layout = self.angle_panel_layout();
         let angle_rects = angle_layout.rects();
+        let box_layout = self.box_panel_layout_with_angle_rects(&angle_rects);
         let mut bounds = content_bounds(self.points);
 
         if self.north_visible {
@@ -4096,6 +4301,12 @@ impl App {
             }
         }
 
+        if self.box_visible {
+            if let Some(box_content) = box_bounds(&self.box_points, &box_layout) {
+                bounds = merge_bounds(bounds, box_content);
+            }
+        }
+
         merge_bounds(
             bounds,
             panel_layout_bounds(&angle_rects, self.points[1]),
@@ -4138,6 +4349,10 @@ impl App {
             if let Some(helper) = &mut self.helper_point {
                 helper.x += shift_x;
                 helper.y += shift_y;
+            }
+            for point in &mut self.box_points {
+                point.x += shift_x;
+                point.y += shift_y;
             }
             if let Ok(outer) = window.outer_position() {
                 window.set_outer_position(PhysicalPosition::new(
