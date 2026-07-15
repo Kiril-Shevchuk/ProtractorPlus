@@ -3,6 +3,7 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/ProtractorPlus.ico");
+    println!("cargo:rerun-if-changed=assets/splash_icon.rgba");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
     let font_path = out_dir.join("comfortaa-variable.ttf");
@@ -28,8 +29,8 @@ fn main() {
             .set("ProductName", "ProtractorPlus")
             .set("CompanyName", "Kiril Shevchuk")
             .set("LegalCopyright", "Copyright (c) 2026 Kiril Shevchuk")
-            .set("FileVersion", "2.7.2.0")
-            .set("ProductVersion", "2.7.2")
+            .set("FileVersion", "2.8.0.0")
+            .set("ProductVersion", "2.8.0")
             .set("InternalName", "ProtractorPlus.exe")
             .set("OriginalFilename", "ProtractorPlus.exe");
 

@@ -3,6 +3,7 @@
 mod distance;
 mod draw;
 mod icon;
+mod splash;
 mod text;
 mod win32_layered;
 
@@ -27,7 +28,7 @@ use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Trans
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -68,6 +69,18 @@ const NORTH_LOCK_GAP: f32 = 5.0;
 const COURSE_ARC_MIN_RADIUS: f32 = 24.0;
 const COURSE_ARC_MAX_RADIUS: f32 = 50.0;
 const COURSE_LABEL_OFFSET: f32 = 12.0;
+const SPLASH_DURATION: Duration = Duration::from_secs(4);
+const SPLASH_SCREEN_FRACTION: f32 = 0.25;
+const SPLASH_MIN_SIZE: u32 = 220;
+const SPLASH_MAX_SIZE: u32 = 720;
+
+#[derive(Clone, Copy, Debug)]
+struct MonitorGeometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -1453,11 +1466,14 @@ fn draw_helper_lock_icon(
     } else {
         Color::from_rgba8(28, 135, 62, 245)
     };
+    // The helper lock is green when the plus is fixed on screen. Unlike the
+    // blue/red absolute pins, it deliberately does not use the global yellow
+    // pinned palette.
     draw_lock_at(
         pixmap,
         helper_lock_center(helper),
-        false,
         pinned,
+        false,
         Color::from_rgba8(48, 205, 88, 255),
         open_color,
     );
@@ -2182,6 +2198,9 @@ fn xtk_overlay_bounds(points: [Point; 3], helper: Point) -> ContentBounds {
 
 struct App {
     window: Option<Arc<Window>>,
+    splash_window: Option<Arc<Window>>,
+    splash_deadline: Option<Instant>,
+    startup_monitor: Option<MonitorGeometry>,
     points: [Point; 3],
     helper_point: Option<Point>,
     active_handle: Option<usize>,
@@ -2223,6 +2242,9 @@ impl App {
         let saved = load_state();
         let mut app = Self {
             window: None,
+            splash_window: None,
+            splash_deadline: None,
+            startup_monitor: None,
             points: saved.map(|state| state.points).unwrap_or_else(default_points),
             helper_point: saved.and_then(|state| state.helper_point),
             active_handle: None,
@@ -2304,6 +2326,132 @@ impl App {
             helper.x += dx;
             helper.y += dy;
         }
+    }
+
+    fn detect_startup_monitor(event_loop: &ActiveEventLoop) -> MonitorGeometry {
+        let monitor = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next());
+        if let Some(monitor) = monitor {
+            let position = monitor.position();
+            let size = monitor.size();
+            MonitorGeometry {
+                x: position.x,
+                y: position.y,
+                width: size.width.max(1),
+                height: size.height.max(1),
+            }
+        } else {
+            MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }
+        }
+    }
+
+    fn splash_size(monitor: MonitorGeometry) -> u32 {
+        ((monitor.width.min(monitor.height) as f32 * SPLASH_SCREEN_FRACTION).round() as u32)
+            .clamp(SPLASH_MIN_SIZE, SPLASH_MAX_SIZE)
+    }
+
+    fn center_window_on_monitor(window: &Window, monitor: MonitorGeometry) {
+        let size = window.inner_size();
+        let x = monitor.x + ((monitor.width as i64 - size.width as i64) / 2) as i32;
+        let y = monitor.y + ((monitor.height as i64 - size.height as i64) / 2) as i32;
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
+
+    fn create_splash_window(&mut self, event_loop: &ActiveEventLoop) {
+        let monitor = Self::detect_startup_monitor(event_loop);
+        let side = Self::splash_size(monitor);
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("ProtractorPlus")
+                        .with_inner_size(PhysicalSize::new(side, side))
+                        .with_transparent(true)
+                        .with_decorations(false)
+                        .with_resizable(false)
+                        .with_window_icon(Some(icon::window_icon())),
+                )
+                .expect("create splash window"),
+        );
+        Self::center_window_on_monitor(&window, monitor);
+        let hwnd = hwnd_from_window(&window);
+        unsafe {
+            configure_overlay(hwnd);
+            set_click_through(hwnd, true);
+        }
+        self.startup_monitor = Some(monitor);
+        self.splash_deadline = Some(Instant::now() + SPLASH_DURATION);
+        self.splash_window = Some(window);
+        if let Some(window) = &self.splash_window {
+            window.request_redraw();
+        }
+    }
+
+    fn create_main_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("ProtractorPlus")
+                        .with_inner_size(LogicalSize::new(640.0, 420.0))
+                        .with_transparent(true)
+                        .with_decorations(false)
+                        .with_resizable(true)
+                        .with_window_icon(Some(icon::window_icon())),
+                )
+                .expect("create main window"),
+        );
+        let hwnd = hwnd_from_window(&window);
+        unsafe {
+            configure_overlay(hwnd);
+            set_click_through(hwnd, CLICK_THROUGH.load(Ordering::Relaxed));
+        }
+        self.window = Some(window);
+        self.fit_window_to_content();
+
+        if let (Some(window), Some(monitor)) = (&self.window, self.startup_monitor) {
+            let blue = self.points[1];
+            let screen_center_x = monitor.x + monitor.width as i32 / 2;
+            let screen_center_y = monitor.y + monitor.height as i32 / 2;
+            window.set_outer_position(PhysicalPosition::new(
+                screen_center_x - blue.x.round() as i32,
+                screen_center_y - blue.y.round() as i32,
+            ));
+        } else {
+            self.center_blue_on_current_monitor();
+        }
+        self.redraw();
+    }
+
+    fn redraw_splash(&self) {
+        let Some(window) = &self.splash_window else {
+            return;
+        };
+        let size = window.inner_size();
+        let pixmap = splash::render(size.width.max(1), size.height.max(1));
+        let pos = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        unsafe {
+            present_pixmap(hwnd_from_window(window), &pixmap, pos.x, pos.y);
+        }
+    }
+
+    fn finish_splash(&mut self, event_loop: &ActiveEventLoop) {
+        self.splash_deadline = None;
+        if let Some(window) = self.splash_window.take() {
+            window.set_visible(false);
+        }
+        self.create_main_window(event_loop);
     }
 
     fn red_point_pinned(&self, index: usize) -> bool {
@@ -3380,38 +3528,55 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.window.is_some() || self.splash_window.is_some() {
             return;
         }
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("ProtractorPlus")
-                        .with_inner_size(LogicalSize::new(640.0, 420.0))
-                        .with_transparent(true)
-                        .with_decorations(false)
-                        .with_resizable(true)
-                        .with_window_icon(Some(icon::window_icon())),
-                )
-                .expect("create window"),
-        );
-        let hwnd = hwnd_from_window(&window);
-        unsafe {
-            configure_overlay(hwnd);
+        self.create_splash_window(event_loop);
+        if let Some(deadline) = self.splash_deadline {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
-        self.window = Some(window);
-        self.fit_window_to_content();
-        self.center_blue_on_current_monitor();
-        self.redraw();
     }
 
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self
+            .splash_window
+            .as_ref()
+            .map(|window| window.id() == window_id)
+            .unwrap_or(false)
+        {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::RedrawRequested => self.redraw_splash(),
+                WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                    if let Some(window) = &self.splash_window {
+                        window.request_redraw();
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state == ElementState::Pressed
+                        && event.logical_key == Key::Named(NamedKey::Escape) =>
+                {
+                    event_loop.exit();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self
+            .window
+            .as_ref()
+            .map(|window| window.id() != window_id)
+            .unwrap_or(true)
+        {
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 self.save_state();
@@ -3817,7 +3982,21 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.splash_window.is_some() {
+            let deadline = self
+                .splash_deadline
+                .unwrap_or_else(|| Instant::now() + SPLASH_DURATION);
+            if Instant::now() >= deadline {
+                self.finish_splash(event_loop);
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+            return;
+        }
+
+        event_loop.set_control_flow(ControlFlow::Wait);
         let Some(window) = &self.window else {
             return;
         };

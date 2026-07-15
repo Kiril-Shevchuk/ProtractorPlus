@@ -1,3 +1,4 @@
+use crate::draw::fill_rounded_rect;
 use crate::text::{draw_text, layout_text};
 use tiny_skia::{Color, Pixmap, PremultipliedColorU8};
 
@@ -6,10 +7,9 @@ const SOURCE_HEIGHT: usize = 512;
 const SOURCE_RGBA: &[u8] = include_bytes!("../assets/splash_icon.rgba");
 const SIGNATURE: &str = "Cb prod.";
 
-pub fn render_splash(width: u32, height: u32) -> Pixmap {
+pub fn render(width: u32, height: u32) -> Pixmap {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("splash pixmap allocation");
     pixmap.fill(Color::TRANSPARENT);
-
     draw_scaled_icon(&mut pixmap);
     draw_signature(&mut pixmap);
     pixmap
@@ -76,15 +76,30 @@ fn source_pixel(x: usize, y: usize) -> [u8; 4] {
 
 fn draw_signature(pixmap: &mut Pixmap) {
     let side = pixmap.width().min(pixmap.height()) as f32;
-    let font_size = (side * 0.040).clamp(9.0, 18.0);
-    let margin_x = side * 0.075;
-    let margin_y = side * 0.070;
+    let font_size = (side * 0.044).clamp(11.0, 22.0);
+    let margin = side * 0.055;
+    let padding_x = (font_size * 0.52).max(5.0);
+    let padding_y = (font_size * 0.32).max(3.0);
     let layout = layout_text(SIGNATURE, font_size);
 
-    let visual_right = pixmap.width() as f32 - margin_x;
-    let visual_bottom = pixmap.height() as f32 - margin_y;
+    let visual_right = pixmap.width() as f32 - margin;
+    let visual_bottom = pixmap.height() as f32 - margin;
     let text_x = visual_right - layout.xmax;
     let baseline_y = visual_bottom + layout.ymin;
+
+    let panel_x = text_x + layout.xmin - padding_x;
+    let panel_y = baseline_y - layout.ymax - padding_y;
+    let panel_width = layout.width + padding_x * 2.0;
+    let panel_height = layout.height + padding_y * 2.0;
+    fill_rounded_rect(
+        pixmap,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        panel_height * 0.28,
+        Color::from_rgba8(0, 0, 0, 178),
+    );
 
     draw_text(
         pixmap,
@@ -92,6 +107,6 @@ fn draw_signature(pixmap: &mut Pixmap) {
         text_x,
         baseline_y,
         font_size,
-        Color::from_rgba8(255, 255, 255, 232),
+        Color::from_rgba8(255, 255, 255, 248),
     );
 }
