@@ -58,14 +58,14 @@ const NORTH_ARROW_LENGTH: f32 = 84.0;
 const NORTH_ARROW_HEAD: f32 = 9.0;
 const NORTH_ARC_MIN_RADIUS: f32 = 38.0;
 const NORTH_ARC_MAX_RADIUS: f32 = 72.0;
-const NORTH_LABEL_OFFSET: f32 = 20.0;
+const NORTH_LABEL_OFFSET: f32 = 28.0;
 const NORTH_TEXT_SIZE: f32 = 16.0;
 const NORTH_HANDLE_INDEX: usize = 4;
 const NORTH_HANDLE_HIT_RADIUS: f32 = 15.0;
 const NORTH_LOCK_GAP: f32 = 5.0;
 const COURSE_ARC_MIN_RADIUS: f32 = 24.0;
 const COURSE_ARC_MAX_RADIUS: f32 = 50.0;
-const COURSE_LABEL_OFFSET: f32 = 18.0;
+const COURSE_LABEL_OFFSET: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug)]
 struct SavedState {
@@ -675,19 +675,68 @@ fn draw_dashed_line(
     }
 }
 
-fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3], inverted: bool) {
+fn bisector_hypotenuse_distance(points: [Point; 3]) -> Option<f32> {
     let vertex = points[1];
-    let len_a = vector_length(vertex, points[0]);
-    let len_b = vector_length(vertex, points[2]);
+    let (bx, by) = angle_bisector_direction(points)?;
+    let a = points[0];
+    let b = points[2];
+    let segment_x = b.x - a.x;
+    let segment_y = b.y - a.y;
+    let denominator = cross_2d(bx, by, segment_x, segment_y);
+    if denominator.abs() < EPSILON {
+        return None;
+    }
+
+    let av_x = a.x - vertex.x;
+    let av_y = a.y - vertex.y;
+    let distance = cross_2d(av_x, av_y, segment_x, segment_y) / denominator;
+    let segment_position = cross_2d(av_x, av_y, bx, by) / denominator;
+    if distance < 0.0 || !(-EPSILON..=1.0 + EPSILON).contains(&segment_position) {
+        return None;
+    }
+    Some(distance)
+}
+
+fn displayed_bisector_length(points: [Point; 3], helper: Option<Point>) -> f32 {
+    let vertex = points[1];
+    if let Some(helper) = helper {
+        // v2.7: while the green-plus ray is present, the bisector follows it
+        // but remains slightly shorter. If the plus is inside the red triangle,
+        // the ray is still extended at least to the red hypotenuse.
+        let helper_length = vector_length(vertex, helper);
+        let desired = (helper_length - 14.0).max(HANDLE_RADIUS + 6.0);
+        let hypotenuse_minimum = bisector_hypotenuse_distance(points)
+            .map(|distance| distance + 2.0)
+            .unwrap_or(0.0);
+        desired.max(hypotenuse_minimum).min(MAX_LINE_LEN)
+    } else {
+        vector_length(vertex, points[0])
+            .min(vector_length(vertex, points[2]))
+            * 0.88
+    }
+}
+
+fn draw_dashed_bisector(
+    pixmap: &mut Pixmap,
+    points: [Point; 3],
+    helper: Option<Point>,
+    inverted: bool,
+) {
+    let vertex = points[1];
     let Some((bx, by)) = angle_bisector_direction(points) else {
         return;
     };
 
-    let total = len_a.min(len_b) * 0.88;
+    let total = displayed_bisector_length(points, helper);
+    let color = if helper.is_some() {
+        Color::from_rgba8(235, 190, 34, 238)
+    } else {
+        foreground_line_color(inverted)
+    };
+
     let dash = 6.0;
     let gap = 5.0;
     let mut distance = HANDLE_RADIUS + 3.0;
-    let color = foreground_line_color(inverted);
     while distance < total {
         let end_distance = (distance + dash).min(total);
         stroke_segment(
@@ -700,7 +749,7 @@ fn draw_dashed_bisector(pixmap: &mut Pixmap, points: [Point; 3], inverted: bool)
                 x: vertex.x + bx * end_distance,
                 y: vertex.y + by * end_distance,
             },
-            1.0,
+            1.15,
             color,
         );
         distance += dash + gap;
@@ -726,16 +775,49 @@ fn north_arc_geometry(points: [Point; 3], north_angle: f32) -> Option<(f32, f32,
     Some((bisector_angle, sweep, mid_angle, radius))
 }
 
-fn north_angle_label_rect(points: [Point; 3], north_angle: f32) -> Option<PanelRect> {
+fn panels_overlap_with_margin(a: PanelRect, b: PanelRect, margin: f32) -> bool {
+    a.x < b.x + b.width + margin
+        && a.x + a.width + margin > b.x
+        && a.y < b.y + b.height + margin
+        && a.y + a.height + margin > b.y
+}
+
+fn north_angle_label_rect(
+    points: [Point; 3],
+    north_angle: f32,
+    course_panel: Option<PanelRect>,
+) -> Option<PanelRect> {
     let vertex = points[1];
     let (_bisector_angle, sweep, mid_angle, radius) = north_arc_geometry(points, north_angle)?;
     let angle_text = format!("{}°", bearing_degrees(sweep));
-    let center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+    let mut label_distance = radius + NORTH_LABEL_OFFSET;
+
+    // The blue North label is the one that moves outward. This guarantees that
+    // it does not cover the green course label, while keeping the course label
+    // close to its green arc.
+    for _ in 0..16 {
+        let center = point_from_polar(vertex, mid_angle, label_distance);
+        let panel = text_panel_rect(&angle_text, center.x, center.y);
+        if course_panel
+            .map(|other| !panels_overlap_with_margin(panel, other, 5.0))
+            .unwrap_or(true)
+        {
+            return Some(panel);
+        }
+        label_distance += 7.0;
+    }
+
+    let center = point_from_polar(vertex, mid_angle, label_distance);
     Some(text_panel_rect(&angle_text, center.x, center.y))
 }
 
-fn in_north_angle_label(point: Point, points: [Point; 3], north_angle: f32) -> bool {
-    let Some(panel) = north_angle_label_rect(points, north_angle) else {
+fn in_north_angle_label(
+    point: Point,
+    points: [Point; 3],
+    north_angle: f32,
+    course_panel: Option<PanelRect>,
+) -> bool {
+    let Some(panel) = north_angle_label_rect(points, north_angle, course_panel) else {
         return false;
     };
     point.x >= panel.x
@@ -843,6 +925,7 @@ fn draw_north_overlay(
     north_angle: f32,
     north_locked: bool,
     show_angle_label: bool,
+    course_panel: Option<PanelRect>,
 ) {
     let vertex = points[1];
     let line_color = foreground_line_color(inverted);
@@ -910,15 +993,16 @@ fn draw_north_overlay(
 
     if show_angle_label {
         let angle_text = format!("{}°", bearing_degrees(sweep));
-        let label_center = point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
-        draw_text_panel(
-            pixmap,
-            &angle_text,
-            label_center.x,
-            label_center.y,
-            Color::from_rgba8(218, 233, 255, 188),
-            Color::from_rgba8(28, 87, 190, 252),
-        );
+        if let Some(panel) = north_angle_label_rect(points, north_angle, course_panel) {
+            draw_text_panel(
+                pixmap,
+                &angle_text,
+                panel.x + panel.width * 0.5,
+                panel.y + panel.height * 0.5,
+                Color::from_rgba8(218, 233, 255, 188),
+                Color::from_rgba8(28, 87, 190, 252),
+            );
+        }
     }
 }
 
@@ -926,6 +1010,7 @@ fn north_overlay_bounds(
     points: [Point; 3],
     bisector_visible: bool,
     north_angle: f32,
+    course_panel: Option<PanelRect>,
 ) -> ContentBounds {
     let vertex = points[1];
     let arrow_tip = north_arrow_tip(vertex, north_angle);
@@ -949,10 +1034,13 @@ fn north_overlay_bounds(
                 north_angle,
                 sweep,
             );
-            let angle_text = format!("{}°", bearing_degrees(sweep));
-            let label_center =
-                point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
-            let panel = text_panel_rect(&angle_text, label_center.x, label_center.y);
+            let panel = north_angle_label_rect(points, north_angle, course_panel)
+                .unwrap_or_else(|| {
+                    let angle_text = format!("{}°", bearing_degrees(sweep));
+                    let label_center =
+                        point_from_polar(vertex, mid_angle, radius + NORTH_LABEL_OFFSET);
+                    text_panel_rect(&angle_text, label_center.x, label_center.y)
+                });
             bounds.min_x = bounds.min_x.min(panel.x);
             bounds.min_y = bounds.min_y.min(panel.y);
             bounds.max_x = bounds.max_x.max(panel.x + panel.width);
@@ -1469,6 +1557,20 @@ fn helper_overlay_bounds(
         max_y: helper.y.max(vertex.y) + PLUS_HIT_RADIUS,
     };
 
+    if bisector_visible {
+        if let Some((bx, by)) = angle_bisector_direction(points) {
+            let length = displayed_bisector_length(points, Some(helper));
+            include_point_in_bounds(
+                &mut bounds,
+                Point {
+                    x: vertex.x + bx * length,
+                    y: vertex.y + by * length,
+                },
+                5.0,
+            );
+        }
+    }
+
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
     let outside = helper_outside_angle(points, helper);
@@ -1942,6 +2044,17 @@ impl App {
         self.request_redraw();
     }
 
+    fn course_panel_for_north(&self) -> Option<PanelRect> {
+        if !self.course_visible
+            || !self.north_visible
+            || self.hidden_angle_panels.course
+        {
+            return None;
+        }
+        let helper = self.helper_point?;
+        course_angle_label_rect(self.points[1], helper, self.north_angle)
+    }
+
     fn current_signed_angle(&self) -> f32 {
         let vertex = self.points[1];
         normalize_signed_angle(
@@ -2136,15 +2249,14 @@ impl App {
         if self.north_visible
             && self.bisector_visible
             && !self.hidden_angle_panels.north
-            && in_north_angle_label(point, self.points, self.north_angle)
+            && in_north_angle_label(
+                point,
+                self.points,
+                self.north_angle,
+                self.course_panel_for_north(),
+            )
         {
             self.hidden_angle_panels.north = true;
-            self.request_redraw();
-            return true;
-        }
-
-        if !self.hidden_angle_panels.main && point_in_panel(point, label_panel_rect(self.points)) {
-            self.hidden_angle_panels.main = true;
             self.request_redraw();
             return true;
         }
@@ -2346,7 +2458,7 @@ impl App {
             }
         }
         if self.bisector_visible {
-            draw_dashed_bisector(&mut pixmap, self.points, self.inverted);
+            draw_dashed_bisector(&mut pixmap, self.points, self.helper_point, self.inverted);
         }
         if self.north_visible {
             draw_north_overlay(
@@ -2357,6 +2469,7 @@ impl App {
                 self.north_angle,
                 self.north_locked,
                 !self.hidden_angle_panels.north,
+                self.course_panel_for_north(),
             );
         }
         if self.course_visible {
@@ -2983,7 +3096,12 @@ impl ApplicationHandler for App {
                 if self.north_visible
                     && self.bisector_visible
                     && !self.hidden_angle_panels.north
-                    && in_north_angle_label(cursor, self.points, self.north_angle)
+                    && in_north_angle_label(
+                        cursor,
+                        self.points,
+                        self.north_angle,
+                        self.course_panel_for_north(),
+                    )
                 {
                     self.angle_wheel_accumulator = 0.0;
                     self.rotation_wheel_accumulator = 0.0;
@@ -3156,7 +3274,12 @@ impl App {
         if self.north_visible {
             bounds = merge_bounds(
                 bounds,
-                north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
+                north_overlay_bounds(
+                    self.points,
+                    self.bisector_visible,
+                    self.north_angle,
+                    self.course_panel_for_north(),
+                ),
             );
         }
         if self.course_visible {
@@ -3234,7 +3357,12 @@ impl App {
         if self.north_visible {
             bounds = merge_bounds(
                 bounds,
-                north_overlay_bounds(self.points, self.bisector_visible, self.north_angle),
+                north_overlay_bounds(
+                    self.points,
+                    self.bisector_visible,
+                    self.north_angle,
+                    self.course_panel_for_north(),
+                ),
             );
         }
         if self.course_visible {

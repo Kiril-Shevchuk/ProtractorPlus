@@ -11,10 +11,10 @@ pub struct Point {
 
 pub const HANDLE_RADIUS: f32 = 10.5;
 pub const LABEL_FONT_SIZE: f32 = 16.5;
-const LABEL_PAD_X: f32 = 8.0;
-const LABEL_PAD_Y: f32 = 5.0;
-const LABEL_MIN_HEIGHT: f32 = 25.0;
-const LABEL_RADIUS: f32 = 7.0;
+const LABEL_PAD_X: f32 = 6.8;
+const LABEL_PAD_Y: f32 = 4.25;
+const LABEL_MIN_HEIGHT: f32 = 21.25;
+const LABEL_RADIUS: f32 = 5.95;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContentBounds {
