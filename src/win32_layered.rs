@@ -31,6 +31,7 @@ pub const MENU_DISTANCE_PLUS: u32 = 18;
 pub const MENU_XTK_PLUS: u32 = 19;
 pub const MENU_BOX_PLUS: u32 = 20;
 pub const MENU_DELETE_BOX_POINT: u32 = 50;
+pub const MENU_ADD_BOX_POINT: u32 = 51;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
@@ -181,7 +182,15 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
 
 pub unsafe fn show_box_point_menu(hwnd: HWND) -> Option<u32> {
     let menu: HMENU = CreatePopupMenu().ok()?;
+    let add = wide("Точка +");
     let delete = wide("Видалити");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_ADD_BOX_POINT as usize,
+        PCWSTR(add.as_ptr()),
+    );
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
     let _ = AppendMenuW(
         menu,
         MF_STRING,
