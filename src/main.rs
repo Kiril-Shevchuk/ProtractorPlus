@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use distance::{
     distance_bounds, draw_distance_overlay, hit_test_distance_panel, meters_for_kind,
-    DistanceEditor, DistanceKind,
+    DistanceEditor, DistanceKind, HiddenDistancePanels,
 };
 use draw::{
     angle_between, content_bounds, draw_arc, draw_plus_handle, draw_text_panel,
@@ -105,6 +105,112 @@ struct HiddenAnglePanels {
     helper_right: bool,
     helper_yellow: bool,
     helper_delta: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AnglePanelLayout {
+    main: Option<PanelRect>,
+    north: Option<PanelRect>,
+    course: Option<PanelRect>,
+    helper_left: Option<PanelRect>,
+    helper_right: Option<PanelRect>,
+    helper_yellow: Option<PanelRect>,
+    helper_delta: Option<PanelRect>,
+}
+
+impl AnglePanelLayout {
+    fn rects(self) -> Vec<PanelRect> {
+        [
+            self.main,
+            self.north,
+            self.course,
+            self.helper_left,
+            self.helper_right,
+            self.helper_yellow,
+            self.helper_delta,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+fn translate_panel(panel: PanelRect, dx: f32, dy: f32) -> PanelRect {
+    PanelRect {
+        x: panel.x + dx,
+        y: panel.y + dy,
+        ..panel
+    }
+}
+
+fn resolve_angle_panel(panel: PanelRect, occupied: &[PanelRect], anchor: Point) -> PanelRect {
+    const GAP: f32 = 5.0;
+    const STEP: f32 = 7.0;
+    if occupied
+        .iter()
+        .all(|other| !panels_overlap_with_margin(panel, *other, GAP))
+    {
+        return panel;
+    }
+
+    let center = Point {
+        x: panel.x + panel.width * 0.5,
+        y: panel.y + panel.height * 0.5,
+    };
+    let mut ux = center.x - anchor.x;
+    let mut uy = center.y - anchor.y;
+    let len = (ux * ux + uy * uy).sqrt();
+    if len > EPSILON {
+        ux /= len;
+        uy /= len;
+    } else {
+        ux = 0.0;
+        uy = -1.0;
+    }
+    let px = -uy;
+    let py = ux;
+
+    for ring in 1..=18 {
+        let d = ring as f32 * STEP;
+        let candidates = [
+            (ux * d, uy * d),
+            (px * d, py * d),
+            (-px * d, -py * d),
+            (ux * d + px * d * 0.6, uy * d + py * d * 0.6),
+            (ux * d - px * d * 0.6, uy * d - py * d * 0.6),
+            (0.0, -d),
+            (0.0, d),
+            (-d, 0.0),
+            (d, 0.0),
+        ];
+        for (dx, dy) in candidates {
+            let candidate = translate_panel(panel, dx, dy);
+            if occupied
+                .iter()
+                .all(|other| !panels_overlap_with_margin(candidate, *other, GAP))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    translate_panel(panel, 0.0, 19.0 * STEP)
+}
+
+fn panel_layout_bounds(rects: &[PanelRect], fallback: Point) -> ContentBounds {
+    let mut bounds = ContentBounds {
+        min_x: fallback.x,
+        min_y: fallback.y,
+        max_x: fallback.x,
+        max_y: fallback.y,
+    };
+    for panel in rects {
+        bounds.min_x = bounds.min_x.min(panel.x);
+        bounds.min_y = bounds.min_y.min(panel.y);
+        bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+        bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+    }
+    bounds
 }
 
 
@@ -1671,6 +1777,10 @@ fn helper_overlay_bounds(
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
     let outside = helper_outside_angle(points, helper);
+    if let Some(outside_info) = outside {
+        let (_, end) = delta_boundary_extension(points, helper, outside_info);
+        include_point_in_bounds(&mut bounds, end, 5.0);
+    }
     if plus_degrees_visible {
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
@@ -1800,6 +1910,55 @@ fn draw_red_ray_extensions(pixmap: &mut Pixmap, points: [Point; 3], helper: Poin
     }
 }
 
+fn delta_boundary_extension(
+    points: [Point; 3],
+    helper: Point,
+    outside: OutsideAngleInfo,
+) -> (Point, Point) {
+    let vertex = points[1];
+    let left_angle = vector_angle(vertex, points[0]);
+    let right_angle = vector_angle(vertex, points[2]);
+    let red = if normalize_signed_angle(outside.boundary_angle - left_angle).abs()
+        <= normalize_signed_angle(outside.boundary_angle - right_angle).abs()
+    {
+        points[0]
+    } else {
+        points[2]
+    };
+    let red_angle = vector_angle(vertex, red);
+    let red_distance = vector_length(vertex, red);
+    let helper_distance = vector_length(vertex, helper);
+    let (_, _, _, _, _, delta_radius) = helper_arc_geometry(points, helper);
+    let start_distance = red_distance + HANDLE_RADIUS + 2.0;
+    let end_distance = helper_distance
+        .max(delta_radius + 42.0)
+        .max(red_distance + 58.0);
+    (
+        point_from_polar(vertex, red_angle, start_distance),
+        point_from_polar(vertex, red_angle, end_distance),
+    )
+}
+
+fn draw_red_delta_boundary_extension(
+    pixmap: &mut Pixmap,
+    points: [Point; 3],
+    helper: Point,
+    outside: OutsideAngleInfo,
+) {
+    let (start, end) = delta_boundary_extension(points, helper, outside);
+    draw_dashed_line(
+        pixmap,
+        start,
+        end,
+        7.0,
+        5.0,
+        1.35,
+        Color::from_rgba8(235, 50, 50, 225),
+        0.0,
+        0.0,
+    );
+}
+
 fn draw_helper_overlay(
     pixmap: &mut Pixmap,
     points: [Point; 3],
@@ -1832,6 +1991,12 @@ fn draw_helper_overlay(
     let (angle_a, angle_h, angle_b, mid1, mid2, radius) =
         helper_arc_geometry(points, helper);
     let outside = helper_outside_angle(points, helper);
+    if let Some(outside_info) = outside {
+        // Keep the nearest red boundary ray visible even after the helper ray
+        // leaves the main sector. The extension grows enough to contain the
+        // red delta arc between the boundary and the helper line.
+        draw_red_delta_boundary_extension(pixmap, points, helper, outside_info);
+    }
     if plus_degrees_visible {
         let arc_color = if outside.is_some() {
             Color::from_rgba8(235, 62, 62, 235)
@@ -2038,6 +2203,7 @@ struct App {
     north_locked: bool,
     course_visible: bool,
     hidden_angle_panels: HiddenAnglePanels,
+    hidden_distance_panels: HiddenDistancePanels,
     blue_pinned: bool,
     left_red_pinned: bool,
     right_red_pinned: bool,
@@ -2088,6 +2254,7 @@ impl App {
             north_locked: saved.map(|state| state.north_locked).unwrap_or(false),
             course_visible: saved.map(|state| state.course_visible).unwrap_or(false),
             hidden_angle_panels: HiddenAnglePanels::default(),
+            hidden_distance_panels: HiddenDistancePanels::default(),
             blue_pinned: saved.map(|state| state.blue_pinned).unwrap_or(false),
             left_red_pinned: saved.map(|state| state.left_red_pinned).unwrap_or(false),
             right_red_pinned: saved.map(|state| state.right_red_pinned).unwrap_or(false),
@@ -2194,6 +2361,211 @@ impl App {
         }
         let helper = self.helper_point?;
         course_angle_label_rect(self.points[1], helper, self.north_angle)
+    }
+
+    fn angle_panel_layout(&self) -> AnglePanelLayout {
+        let mut layout = AnglePanelLayout::default();
+        let mut occupied = Vec::new();
+        let anchor = self.points[1];
+
+        // The main angle panel is mandatory and keeps its canonical position.
+        let main = label_panel_rect(self.points);
+        layout.main = Some(main);
+        occupied.push(main);
+
+        if self.course_visible
+            && self.north_visible
+            && !self.hidden_angle_panels.course
+        {
+            if let Some(helper) = self.helper_point {
+                if let Some(preferred) =
+                    course_angle_label_rect(self.points[1], helper, self.north_angle)
+                {
+                    let resolved = resolve_angle_panel(preferred, &occupied, anchor);
+                    layout.course = Some(resolved);
+                    occupied.push(resolved);
+                }
+            }
+        }
+
+        if self.north_visible
+            && self.bisector_visible
+            && !self.hidden_angle_panels.north
+        {
+            if let Some(preferred) = north_angle_label_rect(self.points, self.north_angle, None) {
+                let resolved = resolve_angle_panel(preferred, &occupied, anchor);
+                layout.north = Some(resolved);
+                occupied.push(resolved);
+            }
+        }
+
+        if let Some(helper) = self.helper_point {
+            if self.plus_degrees_visible {
+                let (left, right) = helper_angle_panel_rects(self.points, helper);
+                if !self.hidden_angle_panels.helper_left {
+                    let resolved = resolve_angle_panel(left, &occupied, anchor);
+                    layout.helper_left = Some(resolved);
+                    occupied.push(resolved);
+                }
+                if !self.hidden_angle_panels.helper_right {
+                    let resolved = resolve_angle_panel(right, &occupied, anchor);
+                    layout.helper_right = Some(resolved);
+                    occupied.push(resolved);
+                }
+                if self.bisector_visible && !self.hidden_angle_panels.helper_yellow {
+                    if let Some(preferred) = helper_yellow_panel_rect(self.points, helper) {
+                        let resolved = resolve_angle_panel(preferred, &occupied, anchor);
+                        layout.helper_yellow = Some(resolved);
+                        occupied.push(resolved);
+                    }
+                }
+            }
+
+            if !self.hidden_angle_panels.helper_delta {
+                if let Some(preferred) = helper_delta_panel_rect(self.points, helper) {
+                    let resolved = resolve_angle_panel(preferred, &occupied, anchor);
+                    layout.helper_delta = Some(resolved);
+                }
+            }
+        }
+
+        layout
+    }
+
+    fn draw_angle_panels(&self, pixmap: &mut Pixmap, layout: AnglePanelLayout) {
+        if let Some(panel) = layout.main {
+            let text = format!(
+                "{}°",
+                angle_between(self.points[0], self.points[1], self.points[2]).round() as i32
+            );
+            draw_text_panel(
+                pixmap,
+                &text,
+                panel.x + panel.width * 0.5,
+                panel.y + panel.height * 0.5,
+                Color::from_rgba8(255, 255, 255, 148),
+                Color::from_rgba8(18, 18, 18, 248),
+            );
+        }
+
+        if let Some(panel) = layout.course {
+            if let Some(helper) = self.helper_point {
+                if let Some((sweep, _, _)) =
+                    course_arc_geometry(self.points[1], helper, self.north_angle)
+                {
+                    let text = format!("{}°", bearing_degrees(sweep));
+                    draw_text_panel(
+                        pixmap,
+                        &text,
+                        panel.x + panel.width * 0.5,
+                        panel.y + panel.height * 0.5,
+                        Color::from_rgba8(225, 255, 225, 188),
+                        Color::from_rgba8(22, 132, 42, 252),
+                    );
+                }
+            }
+        }
+
+        if let Some(panel) = layout.north {
+            if let Some((_, sweep, _, _)) = north_arc_geometry(self.points, self.north_angle) {
+                let text = format!("{}°", bearing_degrees(sweep));
+                draw_text_panel(
+                    pixmap,
+                    &text,
+                    panel.x + panel.width * 0.5,
+                    panel.y + panel.height * 0.5,
+                    Color::from_rgba8(218, 233, 255, 188),
+                    Color::from_rgba8(28, 87, 190, 252),
+                );
+            }
+        }
+
+        if let Some(helper) = self.helper_point {
+            let outside = helper_outside_angle(self.points, helper);
+            let panel_background = if outside.is_some() {
+                Color::from_rgba8(255, 225, 225, 175)
+            } else {
+                Color::from_rgba8(255, 255, 255, 148)
+            };
+            let panel_text = if outside.is_some() {
+                Color::from_rgba8(150, 24, 24, 250)
+            } else {
+                Color::from_rgba8(18, 18, 18, 248)
+            };
+
+            if let Some(panel) = layout.helper_left {
+                let text = format!(
+                    "{}°",
+                    angle_between(self.points[0], self.points[1], helper).round() as i32
+                );
+                draw_text_panel(
+                    pixmap,
+                    &text,
+                    panel.x + panel.width * 0.5,
+                    panel.y + panel.height * 0.5,
+                    panel_background,
+                    panel_text,
+                );
+            }
+            if let Some(panel) = layout.helper_right {
+                let text = format!(
+                    "{}°",
+                    angle_between(helper, self.points[1], self.points[2]).round() as i32
+                );
+                draw_text_panel(
+                    pixmap,
+                    &text,
+                    panel.x + panel.width * 0.5,
+                    panel.y + panel.height * 0.5,
+                    panel_background,
+                    panel_text,
+                );
+            }
+            if let Some(panel) = layout.helper_yellow {
+                if let Some((_, _, _, _, delta)) =
+                    helper_bisector_arc_geometry(self.points, helper)
+                {
+                    let text = format!("{}°", delta.to_degrees().round() as i32);
+                    draw_text_panel(
+                        pixmap,
+                        &text,
+                        panel.x + panel.width * 0.5,
+                        panel.y + panel.height * 0.5,
+                        Color::from_rgba8(255, 244, 178, 185),
+                        Color::from_rgba8(112, 82, 0, 250),
+                    );
+                }
+            }
+            if let (Some(panel), Some(outside)) = (layout.helper_delta, outside) {
+                let text = format!("Δ {}°", outside.delta_radians.to_degrees().round() as i32);
+                draw_text_panel(
+                    pixmap,
+                    &text,
+                    panel.x + panel.width * 0.5,
+                    panel.y + panel.height * 0.5,
+                    Color::from_rgba8(255, 205, 205, 205),
+                    Color::from_rgba8(165, 24, 24, 252),
+                );
+            }
+        }
+    }
+
+    fn hide_distance_panel_at(&mut self, point: Point) -> bool {
+        let Some(kind) = self.distance_panel_at(point) else {
+            return false;
+        };
+        self.hidden_distance_panels.hide(kind);
+        if self
+            .distance_editor
+            .as_ref()
+            .map(|editor| editor.kind == kind)
+            .unwrap_or(false)
+        {
+            self.distance_editor = None;
+        }
+        self.fit_window_to_content();
+        self.request_redraw();
+        true
     }
 
     fn current_signed_angle(&self) -> f32 {
@@ -2340,66 +2712,56 @@ impl App {
     }
 
     fn hide_angle_panel_at(&mut self, point: Point) -> bool {
-        // Test in reverse drawing order so the visually topmost panel wins if
-        // two translucent labels overlap. This state is intentionally not
-        // persisted: restarting the app also restores every degree panel.
-        if let Some(helper) = self.helper_point {
-            if let Some(panel) = helper_delta_panel_rect(self.points, helper) {
-                if !self.hidden_angle_panels.helper_delta && point_in_panel(point, panel) {
-                    self.hidden_angle_panels.helper_delta = true;
-                    self.request_redraw();
-                    return true;
-                }
-            }
+        // The main blue-vertex angle panel is intentionally permanent.
+        let layout = self.angle_panel_layout();
 
-            if self.plus_degrees_visible {
-                if self.bisector_visible && !self.hidden_angle_panels.helper_yellow {
-                    if let Some(panel) = helper_yellow_panel_rect(self.points, helper) {
-                        if point_in_panel(point, panel) {
-                            self.hidden_angle_panels.helper_yellow = true;
-                            self.request_redraw();
-                            return true;
-                        }
-                    }
-                }
-
-                let (left, right) = helper_angle_panel_rects(self.points, helper);
-                if !self.hidden_angle_panels.helper_right && point_in_panel(point, right) {
-                    self.hidden_angle_panels.helper_right = true;
-                    self.request_redraw();
-                    return true;
-                }
-                if !self.hidden_angle_panels.helper_left && point_in_panel(point, left) {
-                    self.hidden_angle_panels.helper_left = true;
-                    self.request_redraw();
-                    return true;
-                }
-            }
-
-            if self.course_visible
-                && self.north_visible
-                && !self.hidden_angle_panels.course
-                && in_course_angle_label(point, self.points[1], helper, self.north_angle)
-            {
-                self.hidden_angle_panels.course = true;
+        if let Some(panel) = layout.helper_delta {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.helper_delta = true;
+                self.fit_window_to_content();
                 self.request_redraw();
                 return true;
             }
         }
-
-        if self.north_visible
-            && self.bisector_visible
-            && !self.hidden_angle_panels.north
-            && in_north_angle_label(
-                point,
-                self.points,
-                self.north_angle,
-                self.course_panel_for_north(),
-            )
-        {
-            self.hidden_angle_panels.north = true;
-            self.request_redraw();
-            return true;
+        if let Some(panel) = layout.helper_yellow {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.helper_yellow = true;
+                self.fit_window_to_content();
+                self.request_redraw();
+                return true;
+            }
+        }
+        if let Some(panel) = layout.helper_right {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.helper_right = true;
+                self.fit_window_to_content();
+                self.request_redraw();
+                return true;
+            }
+        }
+        if let Some(panel) = layout.helper_left {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.helper_left = true;
+                self.fit_window_to_content();
+                self.request_redraw();
+                return true;
+            }
+        }
+        if let Some(panel) = layout.course {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.course = true;
+                self.fit_window_to_content();
+                self.request_redraw();
+                return true;
+            }
+        }
+        if let Some(panel) = layout.north {
+            if point_in_panel(point, panel) {
+                self.hidden_angle_panels.north = true;
+                self.fit_window_to_content();
+                self.request_redraw();
+                return true;
+            }
         }
 
         false
@@ -2426,6 +2788,7 @@ impl App {
     fn toggle_helper_point(&mut self) {
         self.reset_helper_angle_panels();
         self.hidden_angle_panels.course = false;
+        self.hidden_distance_panels.clear_all();
         self.helper_point = if self.helper_point.is_some() {
             self.distance_visible = false;
             self.distance_editor = None;
@@ -2443,6 +2806,7 @@ impl App {
     }
 
     fn toggle_distance_mode(&mut self) {
+        self.hidden_distance_panels.clear_all();
         if self.distance_visible {
             self.distance_visible = false;
             self.distance_editor = None;
@@ -2492,10 +2856,19 @@ impl App {
                 self.plus_degrees_visible = !self.plus_degrees_visible;
             }
             MENU_INVERSION => self.inverted = !self.inverted,
-            MENU_HYPOTENUSE => self.hypotenuse_visible = !self.hypotenuse_visible,
-            MENU_FRONT_PLUS => self.front_plus_visible = !self.front_plus_visible,
+            MENU_HYPOTENUSE => {
+                self.hypotenuse_visible = !self.hypotenuse_visible;
+                self.hidden_distance_panels.show(DistanceKind::Hypotenuse);
+            },
+            MENU_FRONT_PLUS => {
+                self.front_plus_visible = !self.front_plus_visible;
+                self.hidden_distance_panels.show(DistanceKind::FrontLeft);
+                self.hidden_distance_panels.show(DistanceKind::FrontRight);
+            },
             MENU_XTK_PLUS => {
                 self.xtk_visible = !self.xtk_visible;
+                self.hidden_distance_panels
+                    .show(DistanceKind::FrontPerpendicular);
                 if self.xtk_visible && self.helper_point.is_none() {
                     self.helper_point = Some(self.default_helper_point());
                 }
@@ -2597,12 +2970,14 @@ impl App {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+        let angle_layout = self.angle_panel_layout();
+        let angle_rects = angle_layout.rects();
         let mut pixmap = draw::render_angle_measure(
             width,
             height,
             self.points,
             self.inverted,
-            !self.hidden_angle_panels.main,
+            false,
         );
 
         if self.hypotenuse_visible {
@@ -2627,8 +3002,8 @@ impl App {
                 self.inverted,
                 self.north_angle,
                 self.north_locked,
-                !self.hidden_angle_panels.north,
-                self.course_panel_for_north(),
+                false,
+                None,
             );
         }
         if self.course_visible {
@@ -2639,19 +3014,28 @@ impl App {
                         self.points[1],
                         helper,
                         self.north_angle,
-                        !self.hidden_angle_panels.course,
+                        false,
                     );
                 }
             }
         }
         if let Some(helper) = self.helper_point {
+            let suppressed_helper_labels = HiddenAnglePanels {
+                main: true,
+                north: true,
+                course: true,
+                helper_left: true,
+                helper_right: true,
+                helper_yellow: true,
+                helper_delta: true,
+            };
             draw_helper_overlay(
                 &mut pixmap,
                 self.points,
                 helper,
                 self.plus_degrees_visible,
                 self.bisector_visible,
-                self.hidden_angle_panels,
+                suppressed_helper_labels,
                 self.inverted,
             );
             if self.distance_visible && self.meters_per_pixel > 0.0 {
@@ -2664,10 +3048,17 @@ impl App {
                     self.front_plus_visible,
                     self.xtk_visible,
                     self.distance_editor.as_ref(),
+                    self.hidden_distance_panels,
+                    &angle_rects,
                 );
             }
             draw_helper_lock_icon(&mut pixmap, helper, self.helper_pinned, self.inverted);
         }
+
+        // All degree panels are drawn from one collision-resolved layout so
+        // they cannot cover each other or any distance panel.
+        self.draw_angle_panels(&mut pixmap, angle_layout);
+
         draw_lock_icon(
             &mut pixmap,
             self.points,
@@ -2697,6 +3088,7 @@ impl App {
             return None;
         }
         let helper = self.helper_point?;
+        let angle_rects = self.angle_panel_layout().rects();
         hit_test_distance_panel(
             point,
             self.points,
@@ -2706,6 +3098,8 @@ impl App {
             self.front_plus_visible,
             self.xtk_visible,
             self.distance_editor.as_ref(),
+            self.hidden_distance_panels,
+            &angle_rects,
         )
     }
 
@@ -3104,6 +3498,7 @@ impl ApplicationHandler for App {
                             | MENU_INVERSION
                             | MENU_HYPOTENUSE
                             | MENU_FRONT_PLUS
+                            | MENU_XTK_PLUS
                             | MENU_DISTANCE_PLUS
                             | MENU_NORTH_PLUS => self.toggle_feature(command),
                             MENU_MINIMIZE => {
@@ -3122,6 +3517,9 @@ impl ApplicationHandler for App {
                 }
                 if button == MouseButton::Middle && state == ElementState::Pressed {
                     if let Some(pos) = self.cursor_pos {
+                        if self.hide_distance_panel_at(pos) {
+                            return;
+                        }
                         if self.hide_angle_panel_at(pos) {
                             return;
                         }
@@ -3266,12 +3664,12 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let wheel_units = Self::wheel_units(delta);
+                let angle_layout = self.angle_panel_layout();
 
-                if self.course_visible
-                    && self.north_visible
-                    && !self.hidden_angle_panels.course
-                    && self.helper_point.is_some()
-                    && in_course_angle_label(cursor, self.points[1], self.helper_point.unwrap(), self.north_angle)
+                if angle_layout
+                    .course
+                    .map(|panel| point_in_panel(cursor, panel))
+                    .unwrap_or(false)
                 {
                     self.angle_wheel_accumulator = 0.0;
                     self.rotation_wheel_accumulator = 0.0;
@@ -3289,15 +3687,10 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if self.north_visible
-                    && self.bisector_visible
-                    && !self.hidden_angle_panels.north
-                    && in_north_angle_label(
-                        cursor,
-                        self.points,
-                        self.north_angle,
-                        self.course_panel_for_north(),
-                    )
+                if angle_layout
+                    .north
+                    .map(|panel| point_in_panel(cursor, panel))
+                    .unwrap_or(false)
                 {
                     self.angle_wheel_accumulator = 0.0;
                     self.rotation_wheel_accumulator = 0.0;
@@ -3382,7 +3775,11 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if !self.hidden_angle_panels.main && in_angle_label(cursor, self.points) {
+                if angle_layout
+                    .main
+                    .map(|panel| point_in_panel(cursor, panel))
+                    .unwrap_or(false)
+                {
                     self.rotation_wheel_accumulator = 0.0;
                     self.angle_wheel_accumulator += wheel_units;
                     let whole_steps = self.angle_wheel_accumulator.trunc() as i32;
@@ -3463,11 +3860,11 @@ impl App {
         }
     }
 
-    fn fit_window_to_content(&mut self) {
-        let Some(window) = &self.window else {
-            return;
-        };
+    fn calculated_content_bounds(&self) -> ContentBounds {
+        let angle_layout = self.angle_panel_layout();
+        let angle_rects = angle_layout.rects();
         let mut bounds = content_bounds(self.points);
+
         if self.north_visible {
             bounds = merge_bounds(
                 bounds,
@@ -3475,7 +3872,7 @@ impl App {
                     self.points,
                     self.bisector_visible,
                     self.north_angle,
-                    self.course_panel_for_north(),
+                    None,
                 ),
             );
         }
@@ -3513,10 +3910,24 @@ impl App {
                         self.front_plus_visible,
                         self.xtk_visible,
                         self.distance_editor.as_ref(),
+                        self.hidden_distance_panels,
+                        &angle_rects,
                     ),
                 );
             }
         }
+
+        merge_bounds(
+            bounds,
+            panel_layout_bounds(&angle_rects, self.points[1]),
+        )
+    }
+
+    fn fit_window_to_content(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let bounds = self.calculated_content_bounds();
         let mut lock_centers = vec![
             lock_center(self.points),
             red_lock_center(self.points, 0),
@@ -3527,7 +3938,7 @@ impl App {
         }
         let mut min_x = bounds.min_x;
         let mut min_y = bounds.min_y;
-        for center in lock_centers {
+        for center in &lock_centers {
             min_x = min_x.min(center.x - LOCK_PANEL_SIZE * 0.5);
             min_y = min_y.min(center.y - LOCK_PANEL_SIZE * 0.5);
         }
@@ -3557,56 +3968,7 @@ impl App {
             }
         }
 
-        let mut bounds = content_bounds(self.points);
-        if self.north_visible {
-            bounds = merge_bounds(
-                bounds,
-                north_overlay_bounds(
-                    self.points,
-                    self.bisector_visible,
-                    self.north_angle,
-                    self.course_panel_for_north(),
-                ),
-            );
-        }
-        if self.course_visible {
-            if let Some(helper) = self.helper_point {
-                if self.north_visible {
-                    bounds = merge_bounds(
-                        bounds,
-                        course_overlay_bounds(self.points[1], helper, self.north_angle),
-                    );
-                }
-            }
-        }
-        if let Some(helper) = self.helper_point {
-            bounds = merge_bounds(
-                bounds,
-                helper_overlay_bounds(
-                    self.points,
-                    helper,
-                    self.plus_degrees_visible,
-                    self.bisector_visible,
-                ),
-            );
-            if self.xtk_visible {
-                bounds = merge_bounds(bounds, xtk_overlay_bounds(self.points, helper));
-            }
-            if self.distance_visible && self.meters_per_pixel > 0.0 {
-                bounds = merge_bounds(
-                    bounds,
-                    distance_bounds(
-                        self.points,
-                        helper,
-                        self.meters_per_pixel,
-                        self.hypotenuse_visible,
-                        self.front_plus_visible,
-                        self.xtk_visible,
-                        self.distance_editor.as_ref(),
-                    ),
-                );
-            }
-        }
+        let bounds = self.calculated_content_bounds();
         let mut lock_centers = vec![
             lock_center(self.points),
             red_lock_center(self.points, 0),

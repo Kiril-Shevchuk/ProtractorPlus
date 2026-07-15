@@ -8,6 +8,8 @@ const DISTANCE_PAD_X: f32 = 6.375;
 const DISTANCE_PAD_Y: f32 = 4.42;
 const DISTANCE_MIN_HEIGHT: f32 = 19.975;
 const DISTANCE_RADIUS: f32 = 5.44;
+const PANEL_GAP: f32 = 5.0;
+const PANEL_SHIFT_STEP: f32 = 7.0;
 const EPSILON: f32 = 0.0001;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +21,59 @@ pub enum DistanceKind {
     FrontLeft,
     FrontRight,
     FrontPerpendicular,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HiddenDistancePanels {
+    base: bool,
+    left_ray: bool,
+    right_ray: bool,
+    hypotenuse: bool,
+    front_left: bool,
+    front_right: bool,
+    front_perpendicular: bool,
+}
+
+impl HiddenDistancePanels {
+    pub fn is_hidden(self, kind: DistanceKind) -> bool {
+        match kind {
+            DistanceKind::Base => self.base,
+            DistanceKind::LeftRay => self.left_ray,
+            DistanceKind::RightRay => self.right_ray,
+            DistanceKind::Hypotenuse => self.hypotenuse,
+            DistanceKind::FrontLeft => self.front_left,
+            DistanceKind::FrontRight => self.front_right,
+            DistanceKind::FrontPerpendicular => self.front_perpendicular,
+        }
+    }
+
+    pub fn hide(&mut self, kind: DistanceKind) {
+        match kind {
+            DistanceKind::Base => self.base = true,
+            DistanceKind::LeftRay => self.left_ray = true,
+            DistanceKind::RightRay => self.right_ray = true,
+            DistanceKind::Hypotenuse => self.hypotenuse = true,
+            DistanceKind::FrontLeft => self.front_left = true,
+            DistanceKind::FrontRight => self.front_right = true,
+            DistanceKind::FrontPerpendicular => self.front_perpendicular = true,
+        }
+    }
+
+    pub fn show(&mut self, kind: DistanceKind) {
+        match kind {
+            DistanceKind::Base => self.base = false,
+            DistanceKind::LeftRay => self.left_ray = false,
+            DistanceKind::RightRay => self.right_ray = false,
+            DistanceKind::Hypotenuse => self.hypotenuse = false,
+            DistanceKind::FrontLeft => self.front_left = false,
+            DistanceKind::FrontRight => self.front_right = false,
+            DistanceKind::FrontPerpendicular => self.front_perpendicular = false,
+        }
+    }
+
+    pub fn clear_all(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -112,11 +167,8 @@ fn segment_for_kind(
 
 fn reference_for_kind(points: [Point; 3], helper: Point, kind: DistanceKind) -> Point {
     match kind {
-        // Place the base label on the side opposite the red system.
         DistanceKind::Base => midpoint(points[0], points[2]),
-        // Place red-ray labels outside the helper direction.
         DistanceKind::LeftRay | DistanceKind::RightRay => helper,
-        // Place cross-line labels away from the blue vertex.
         DistanceKind::Hypotenuse
         | DistanceKind::FrontLeft
         | DistanceKind::FrontRight
@@ -223,6 +275,59 @@ fn distance_panel_rect(text: &str, cx: f32, cy: f32) -> PanelRect {
     }
 }
 
+fn rects_overlap(a: PanelRect, b: PanelRect, gap: f32) -> bool {
+    a.x < b.x + b.width + gap
+        && a.x + a.width + gap > b.x
+        && a.y < b.y + b.height + gap
+        && a.y + a.height + gap > b.y
+}
+
+fn move_rect(rect: PanelRect, dx: f32, dy: f32) -> PanelRect {
+    PanelRect {
+        x: rect.x + dx,
+        y: rect.y + dy,
+        ..rect
+    }
+}
+
+fn resolve_panel_rect(original: PanelRect, occupied: &[PanelRect]) -> PanelRect {
+    if occupied
+        .iter()
+        .all(|other| !rects_overlap(original, *other, PANEL_GAP))
+    {
+        return original;
+    }
+
+    // Search a compact spiral around the preferred position. Vertical offsets
+    // are tried first because they preserve the panel's relation to its line.
+    for ring in 1..=18 {
+        let d = ring as f32 * PANEL_SHIFT_STEP;
+        let candidates = [
+            (0.0, -d),
+            (0.0, d),
+            (-d, 0.0),
+            (d, 0.0),
+            (-d, -d),
+            (d, -d),
+            (-d, d),
+            (d, d),
+            (-d * 1.5, 0.0),
+            (d * 1.5, 0.0),
+        ];
+        for (dx, dy) in candidates {
+            let candidate = move_rect(original, dx, dy);
+            if occupied
+                .iter()
+                .all(|other| !rects_overlap(candidate, *other, PANEL_GAP))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    move_rect(original, 0.0, 19.0 * PANEL_SHIFT_STEP)
+}
+
 fn draw_distance_panel(
     pixmap: &mut Pixmap,
     text: &str,
@@ -261,21 +366,34 @@ pub fn distance_panels(
     show_front_plus: bool,
     show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
+    hidden: HiddenDistancePanels,
+    avoid_rects: &[PanelRect],
 ) -> Vec<DistancePanel> {
-    visible_kinds(show_hypotenuse, show_front_plus, show_xtk_plus)
-        .into_iter()
-        .map(|kind| {
-            let center = panel_center(points, helper, kind);
-            let text = panel_text(points, helper, meters_per_pixel, kind, editor);
-            let rect = distance_panel_rect(&text, center.x, center.y);
-            DistancePanel {
-                kind,
-                rect,
-                text,
-                center,
-            }
-        })
-        .collect()
+    let mut occupied = avoid_rects.to_vec();
+    let mut panels = Vec::new();
+
+    for kind in visible_kinds(show_hypotenuse, show_front_plus, show_xtk_plus) {
+        if hidden.is_hidden(kind) {
+            continue;
+        }
+        let preferred_center = panel_center(points, helper, kind);
+        let text = panel_text(points, helper, meters_per_pixel, kind, editor);
+        let preferred_rect = distance_panel_rect(&text, preferred_center.x, preferred_center.y);
+        let rect = resolve_panel_rect(preferred_rect, &occupied);
+        let center = Point {
+            x: rect.x + rect.width * 0.5,
+            y: rect.y + rect.height * 0.5,
+        };
+        occupied.push(rect);
+        panels.push(DistancePanel {
+            kind,
+            rect,
+            text,
+            center,
+        });
+    }
+
+    panels
 }
 
 pub fn draw_distance_overlay(
@@ -287,6 +405,8 @@ pub fn draw_distance_overlay(
     show_front_plus: bool,
     show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
+    hidden: HiddenDistancePanels,
+    avoid_rects: &[PanelRect],
 ) {
     for panel in distance_panels(
         points,
@@ -296,6 +416,8 @@ pub fn draw_distance_overlay(
         show_front_plus,
         show_xtk_plus,
         editor,
+        hidden,
+        avoid_rects,
     ) {
         let editing = editor
             .map(|active| active.kind == panel.kind)
@@ -330,6 +452,8 @@ pub fn distance_bounds(
     show_front_plus: bool,
     show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
+    hidden: HiddenDistancePanels,
+    avoid_rects: &[PanelRect],
 ) -> ContentBounds {
     let panels = distance_panels(
         points,
@@ -339,6 +463,8 @@ pub fn distance_bounds(
         show_front_plus,
         show_xtk_plus,
         editor,
+        hidden,
+        avoid_rects,
     );
     let mut bounds = ContentBounds {
         min_x: helper.x,
@@ -364,6 +490,8 @@ pub fn hit_test_distance_panel(
     show_front_plus: bool,
     show_xtk_plus: bool,
     editor: Option<&DistanceEditor>,
+    hidden: HiddenDistancePanels,
+    avoid_rects: &[PanelRect],
 ) -> Option<DistanceKind> {
     distance_panels(
         points,
@@ -373,6 +501,8 @@ pub fn hit_test_distance_panel(
         show_front_plus,
         show_xtk_plus,
         editor,
+        hidden,
+        avoid_rects,
     )
     .into_iter()
     .find(|panel| {
