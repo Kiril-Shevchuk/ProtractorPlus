@@ -1317,6 +1317,35 @@ fn helper_arc_geometry(points: [Point; 3], helper: Point) -> (f32, f32, f32, f32
     (angle_a, angle_h, angle_b, mid_ah, mid_hb, radius)
 }
 
+/// Geometry for the yellow bisector-to-plus measurement introduced in v2.5.
+/// The double arc sits halfway between the existing helper arc and the plus.
+fn helper_bisector_arc_geometry(
+    points: [Point; 3],
+    helper: Point,
+) -> Option<(f32, f32, f32, f32, f32)> {
+    let vertex = points[1];
+    let (bx, by) = angle_bisector_direction(points)?;
+    let bisector_angle = by.atan2(bx);
+    let helper_angle = vector_angle(vertex, helper);
+    let signed_delta = normalize_signed_angle(helper_angle - bisector_angle);
+    let mid_angle = bisector_angle + signed_delta * 0.5;
+
+    let helper_length = vector_length(vertex, helper);
+    if helper_length < EPSILON {
+        return None;
+    }
+    let green_radius = (helper_length * 0.5).max(14.0);
+    let radius = (green_radius + helper_length) * 0.5;
+
+    Some((
+        bisector_angle,
+        helper_angle,
+        mid_angle,
+        radius,
+        signed_delta.abs(),
+    ))
+}
+
 fn include_point_in_bounds(bounds: &mut ContentBounds, point: Point, padding: f32) {
     bounds.min_x = bounds.min_x.min(point.x - padding);
     bounds.min_y = bounds.min_y.min(point.y - padding);
@@ -1379,6 +1408,24 @@ fn helper_overlay_bounds(
     if plus_degrees_visible {
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_a, angle_h);
         include_arc_in_bounds(&mut bounds, vertex, radius, angle_h, angle_b);
+        if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
+            helper_bisector_arc_geometry(points, helper)
+        {
+            include_arc_in_bounds(
+                &mut bounds,
+                vertex,
+                yellow_radius - 2.0,
+                bisector_angle,
+                helper_angle,
+            );
+            include_arc_in_bounds(
+                &mut bounds,
+                vertex,
+                yellow_radius + 2.0,
+                bisector_angle,
+                helper_angle,
+            );
+        }
     } else if let Some(outside) = outside {
         include_arc_in_bounds(
             &mut bounds,
@@ -1415,6 +1462,18 @@ fn helper_overlay_bounds(
             text_panel_rect(&text1, center1.x, center1.y),
             text_panel_rect(&text2, center2.x, center2.y),
         ] {
+            bounds.min_x = bounds.min_x.min(panel.x);
+            bounds.min_y = bounds.min_y.min(panel.y);
+            bounds.max_x = bounds.max_x.max(panel.x + panel.width);
+            bounds.max_y = bounds.max_y.max(panel.y + panel.height);
+        }
+
+        if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
+            helper_bisector_arc_geometry(points, helper)
+        {
+            let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
+            let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
+            let panel = text_panel_rect(&yellow_text, yellow_center.x, yellow_center.y);
             bounds.min_x = bounds.min_x.min(panel.x);
             bounds.min_y = bounds.min_y.min(panel.y);
             bounds.max_x = bounds.max_x.max(panel.x + panel.width);
@@ -1509,6 +1568,32 @@ fn draw_helper_overlay(
         };
         draw_arc(pixmap, vertex, radius, angle_a, angle_h, 1.5, arc_color);
         draw_arc(pixmap, vertex, radius, angle_h, angle_b, 1.5, arc_color);
+
+        if let Some((bisector_angle, helper_angle, _, yellow_radius, _)) =
+            helper_bisector_arc_geometry(points, helper)
+        {
+            let yellow = Color::from_rgba8(235, 190, 34, 238);
+            // A pair of close concentric strokes makes the new measurement
+            // visually distinct without making it heavy.
+            draw_arc(
+                pixmap,
+                vertex,
+                yellow_radius - 2.0,
+                bisector_angle,
+                helper_angle,
+                1.15,
+                yellow,
+            );
+            draw_arc(
+                pixmap,
+                vertex,
+                yellow_radius + 2.0,
+                bisector_angle,
+                helper_angle,
+                1.15,
+                yellow,
+            );
+        }
     } else if let Some(outside) = outside {
         // When “Градуси +” is off, ordinary green helper arcs are hidden.
         // Only the red angular overrun and its delta label remain.
@@ -1555,6 +1640,21 @@ fn draw_helper_overlay(
             panel_background,
             panel_text,
         );
+
+        if let Some((_, _, yellow_mid, yellow_radius, yellow_delta)) =
+            helper_bisector_arc_geometry(points, helper)
+        {
+            let yellow_text = format!("{}°", yellow_delta.to_degrees().round() as i32);
+            let yellow_center = point_from_polar(vertex, yellow_mid, yellow_radius);
+            draw_text_panel(
+                pixmap,
+                &yellow_text,
+                yellow_center.x,
+                yellow_center.y,
+                Color::from_rgba8(255, 244, 178, 185),
+                Color::from_rgba8(112, 82, 0, 250),
+            );
+        }
     }
 
     if let Some(outside) = outside {

@@ -4,10 +4,10 @@ use tiny_skia::{Color, Pixmap};
 
 const LABEL_OFFSET: f32 = 18.0;
 const DISTANCE_FONT_SIZE: f32 = 14.85;
-const DISTANCE_PAD_X: f32 = 9.0;
-const DISTANCE_PAD_Y: f32 = 6.3;
-const DISTANCE_MIN_HEIGHT: f32 = 25.2;
-const DISTANCE_RADIUS: f32 = 7.2;
+const DISTANCE_PAD_X: f32 = 7.5;
+const DISTANCE_PAD_Y: f32 = 5.2;
+const DISTANCE_MIN_HEIGHT: f32 = 23.5;
+const DISTANCE_RADIUS: f32 = 6.4;
 const EPSILON: f32 = 0.0001;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
