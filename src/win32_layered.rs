@@ -31,6 +31,11 @@ pub const MENU_DISTANCE_PLUS: u32 = 18;
 pub const MENU_XTK_PLUS: u32 = 19;
 pub const MENU_BOX_PLUS: u32 = 20;
 pub const MENU_DELETE_BOX_POINT: u32 = 50;
+pub const MENU_ADD_BOX_POINT: u32 = 51;
+pub const MENU_DELETE_BOX_ALL: u32 = 52;
+pub const MENU_ADD_BOX_CORRIDOR: u32 = 53;
+pub const MENU_OTHER_CIRCLE: u32 = 54;
+pub const MENU_DELETE_CORRIDOR: u32 = 55;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMenuState {
@@ -179,16 +184,7 @@ pub unsafe fn show_context_menu(hwnd: HWND, state: ContextMenuState) -> Option<u
     }
 }
 
-pub unsafe fn show_box_point_menu(hwnd: HWND) -> Option<u32> {
-    let menu: HMENU = CreatePopupMenu().ok()?;
-    let delete = wide("Видалити");
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_DELETE_BOX_POINT as usize,
-        PCWSTR(delete.as_ptr()),
-    );
-
+unsafe fn finish_popup_menu(hwnd: HWND, menu: HMENU) -> Option<u32> {
     let mut point = POINT::default();
     if windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).is_err() {
         let _ = DestroyMenu(menu);
@@ -211,6 +207,109 @@ pub unsafe fn show_box_point_menu(hwnd: HWND) -> Option<u32> {
     } else {
         Some(command.0 as u32)
     }
+}
+
+unsafe fn append_box_common_items(menu: HMENU, reverse_bearings: bool) {
+    append_toggle_item(
+        menu,
+        MENU_OTHER_CIRCLE,
+        "Інше коло",
+        reverse_bearings,
+    );
+    let delete_all = wide("Видалити все");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_BOX_ALL as usize,
+        PCWSTR(delete_all.as_ptr()),
+    );
+}
+
+pub unsafe fn show_box_point_menu(hwnd: HWND, reverse_bearings: bool) -> Option<u32> {
+    let menu: HMENU = CreatePopupMenu().ok()?;
+    let add = wide("Точка +");
+    let corridor = wide("Коридор");
+    let delete = wide("Видалити");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_ADD_BOX_POINT as usize,
+        PCWSTR(add.as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_ADD_BOX_CORRIDOR as usize,
+        PCWSTR(corridor.as_ptr()),
+    );
+    append_toggle_item(
+        menu,
+        MENU_OTHER_CIRCLE,
+        "Інше коло",
+        reverse_bearings,
+    );
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_BOX_POINT as usize,
+        PCWSTR(delete.as_ptr()),
+    );
+    let delete_all = wide("Видалити все");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_BOX_ALL as usize,
+        PCWSTR(delete_all.as_ptr()),
+    );
+    finish_popup_menu(hwnd, menu)
+}
+
+pub unsafe fn show_box_segment_menu(hwnd: HWND, reverse_bearings: bool) -> Option<u32> {
+    let menu: HMENU = CreatePopupMenu().ok()?;
+    let corridor = wide("Коридор");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_ADD_BOX_CORRIDOR as usize,
+        PCWSTR(corridor.as_ptr()),
+    );
+    append_box_common_items(menu, reverse_bearings);
+    finish_popup_menu(hwnd, menu)
+}
+
+pub unsafe fn show_box_corridor_menu(hwnd: HWND, reverse_bearings: bool) -> Option<u32> {
+    let menu: HMENU = CreatePopupMenu().ok()?;
+    let corridor = wide("Коридор");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_ADD_BOX_CORRIDOR as usize,
+        PCWSTR(corridor.as_ptr()),
+    );
+    append_toggle_item(
+        menu,
+        MENU_OTHER_CIRCLE,
+        "Інше коло",
+        reverse_bearings,
+    );
+    let delete = wide("Видалити");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_CORRIDOR as usize,
+        PCWSTR(delete.as_ptr()),
+    );
+    let delete_all = wide("Видалити все");
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_DELETE_BOX_ALL as usize,
+        PCWSTR(delete_all.as_ptr()),
+    );
+    finish_popup_menu(hwnd, menu)
 }
 
 pub unsafe fn present_pixmap(hwnd: HWND, pixmap: &Pixmap, x: i32, y: i32) {

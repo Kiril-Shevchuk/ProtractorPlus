@@ -21,8 +21,10 @@ use distance::{
     DistanceEditor, DistanceKind, HiddenDistancePanels,
 };
 use box_overlay::{
-    box_bounds, box_point_at, draw_box_geometry, draw_box_panels, is_close_target,
-    layout_box_panels, load_box_state, save_box_state, BoxPanelKind, BoxPanelLayout,
+    anchor_for_segment, box_anchor_position, box_bounds, box_corridor_end_at, box_lock_at,
+    box_point_at, box_segment_at, draw_box_geometry, draw_box_panels, is_close_target,
+    layout_box_panels, load_box_state, save_box_state, translate_free_corridor_anchors,
+    BoxAnchor, BoxCorridor, BoxPanelKind, BoxPanelLayout, BoxSegmentKind, MAX_BOX_CORRIDORS,
     MAX_BOX_POINTS,
 };
 use draw::{
@@ -35,7 +37,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::text::{draw_text, layout_text};
@@ -45,7 +47,8 @@ use crate::win32_layered::{
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
     MENU_COURSE_PLUS, MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS,
     MENU_PLUS_DEGREES, MENU_XTK_PLUS, MENU_BOX_PLUS, MENU_DELETE_BOX_POINT,
-    show_box_point_menu,
+    MENU_ADD_BOX_POINT, MENU_ADD_BOX_CORRIDOR, MENU_DELETE_BOX_ALL, MENU_DELETE_CORRIDOR,
+    MENU_OTHER_CIRCLE, show_box_corridor_menu, show_box_point_menu, show_box_segment_menu,
 };
 
 static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
@@ -76,6 +79,8 @@ const NORTH_LOCK_GAP: f32 = 5.0;
 const COURSE_ARC_MIN_RADIUS: f32 = 24.0;
 const COURSE_ARC_MAX_RADIUS: f32 = 50.0;
 const COURSE_LABEL_OFFSET: f32 = 12.0;
+const BOX_HANDLE_BASE: usize = 100;
+const BOX_CORRIDOR_HANDLE_BASE: usize = 200;
 const SPLASH_DURATION: Duration = Duration::from_secs(4);
 const SPLASH_SCREEN_FRACTION: f32 = 0.25;
 const SPLASH_MIN_SIZE: u32 = 220;
@@ -136,6 +141,16 @@ struct AnglePanelLayout {
     helper_right: Option<PanelRect>,
     helper_yellow: Option<PanelRect>,
     helper_delta: Option<PanelRect>,
+}
+
+#[derive(Clone, Debug)]
+struct BoxHistoryState {
+    visible: bool,
+    points: Vec<Point>,
+    locked: Vec<bool>,
+    closed: bool,
+    corridors: Vec<BoxCorridor>,
+    reverse_bearings: bool,
 }
 
 impl AnglePanelLayout {
@@ -2239,11 +2254,19 @@ struct App {
     course_visible: bool,
     box_visible: bool,
     box_points: Vec<Point>,
+    box_locked: Vec<bool>,
     box_closed: bool,
+    box_corridors: Vec<BoxCorridor>,
+    box_reverse_bearings: bool,
+    box_insert_after: Option<usize>,
+    box_pending_corridor_anchor: Option<BoxAnchor>,
     box_capture_active: bool,
     box_restore_click_through: bool,
-    hidden_box_distance_panels: u16,
-    hidden_box_bearing_panels: u16,
+    box_drag_last: Option<Point>,
+    box_history: Vec<BoxHistoryState>,
+    modifiers: ModifiersState,
+    hidden_box_distance_panels: u32,
+    hidden_box_bearing_panels: u32,
     hidden_angle_panels: HiddenAnglePanels,
     hidden_distance_panels: HiddenDistancePanels,
     blue_pinned: bool,
@@ -2301,9 +2324,17 @@ impl App {
             course_visible: saved.map(|state| state.course_visible).unwrap_or(false),
             box_visible: box_saved.visible,
             box_points: box_saved.points,
+            box_locked: box_saved.locked,
             box_closed: box_saved.closed,
+            box_corridors: box_saved.corridors,
+            box_reverse_bearings: box_saved.reverse_bearings,
+            box_insert_after: None,
+            box_pending_corridor_anchor: None,
             box_capture_active: false,
             box_restore_click_through: false,
+            box_drag_last: None,
+            box_history: Vec::new(),
+            modifiers: ModifiersState::default(),
             hidden_box_distance_panels: 0,
             hidden_box_bearing_panels: 0,
             hidden_angle_panels: HiddenAnglePanels::default(),
@@ -2346,8 +2377,11 @@ impl App {
                 self.helper_point = Some(self.default_helper_point());
             }
             self.box_points.clear();
+            self.box_locked.clear();
+            self.box_corridors.clear();
             self.box_visible = false;
             self.box_closed = false;
+            self.box_insert_after = None;
             return;
         }
         let dx = anchor.x - vertex.x;
@@ -2364,6 +2398,7 @@ impl App {
             point.x += dx;
             point.y += dy;
         }
+        translate_free_corridor_anchors(&mut self.box_corridors, dx, dy);
     }
 
     fn shift_local_geometry(&mut self, dx: f32, dy: f32) {
@@ -2379,13 +2414,16 @@ impl App {
             point.x += dx;
             point.y += dy;
         }
+        translate_free_corridor_anchors(&mut self.box_corridors, dx, dy);
     }
 
     fn enter_box_capture_mode(&mut self) {
+        let corridor_pending = self.box_pending_corridor_anchor.is_some();
         if self.box_capture_active
             || !self.box_visible
-            || self.box_closed
-            || self.box_points.len() >= MAX_BOX_POINTS
+            || (!corridor_pending
+                && (self.box_points.len() >= MAX_BOX_POINTS
+                    || (self.box_insert_after.is_none() && self.box_closed)))
         {
             return;
         }
@@ -2471,11 +2509,190 @@ impl App {
     }
 
     fn refresh_box_capture_mode(&mut self) {
-        if self.box_visible && !self.box_closed && self.box_points.len() < MAX_BOX_POINTS {
+        let collecting_new = self.box_visible
+            && !self.box_closed
+            && self.box_points.len() < MAX_BOX_POINTS;
+        let inserting = self.box_visible
+            && self.box_insert_after.is_some()
+            && self.box_points.len() < MAX_BOX_POINTS;
+        let adding_corridor = self.box_visible
+            && self.box_pending_corridor_anchor.is_some()
+            && self.box_corridors.len() < MAX_BOX_CORRIDORS;
+        if collecting_new || inserting || adding_corridor {
             self.enter_box_capture_mode();
         } else {
             self.leave_box_capture_mode();
         }
+    }
+
+    fn current_box_history_state(&self) -> BoxHistoryState {
+        BoxHistoryState {
+            visible: self.box_visible,
+            points: self.box_points.clone(),
+            locked: self.box_locked.clone(),
+            closed: self.box_closed,
+            corridors: self.box_corridors.clone(),
+            reverse_bearings: self.box_reverse_bearings,
+        }
+    }
+
+    fn record_box_history(&mut self) {
+        const MAX_HISTORY: usize = 50;
+        if self.box_history.len() >= MAX_HISTORY {
+            self.box_history.remove(0);
+        }
+        self.box_history.push(self.current_box_history_state());
+    }
+
+    fn undo_box(&mut self) {
+        let Some(previous) = self.box_history.pop() else {
+            return;
+        };
+        self.box_visible = previous.visible;
+        self.box_points = previous.points;
+        self.box_locked = previous.locked;
+        self.box_closed = previous.closed;
+        self.box_corridors = previous.corridors;
+        self.box_reverse_bearings = previous.reverse_bearings;
+        self.box_insert_after = None;
+        self.box_pending_corridor_anchor = None;
+        self.box_drag_last = None;
+        self.active_handle = None;
+        self.hidden_box_distance_panels = 0;
+        self.hidden_box_bearing_panels = 0;
+        self.normalize_box_locks();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn box_mask_bit(kind: BoxSegmentKind) -> u32 {
+        match kind {
+            BoxSegmentKind::Edge(index) => 1u32 << index.min(15),
+            BoxSegmentKind::Corridor(index) => 1u32 << (16 + index.min(15)),
+        }
+    }
+
+    fn reset_box_panel_visibility(&mut self) {
+        self.hidden_box_distance_panels = 0;
+        self.hidden_box_bearing_panels = 0;
+    }
+
+    fn detach_corridor_anchors(&mut self) {
+        let starts: Vec<Point> = self
+            .box_corridors
+            .iter()
+            .map(|corridor| {
+                box_anchor_position(&self.box_points, self.box_closed, &corridor.anchor)
+            })
+            .collect();
+        for (corridor, start) in self.box_corridors.iter_mut().zip(starts) {
+            corridor.anchor = BoxAnchor::Free(start);
+        }
+    }
+
+    fn delete_all_box(&mut self) {
+        if self.box_points.is_empty() && self.box_corridors.is_empty() {
+            return;
+        }
+        self.record_box_history();
+        self.box_points.clear();
+        self.box_locked.clear();
+        self.box_corridors.clear();
+        self.box_visible = false;
+        self.box_closed = false;
+        self.box_insert_after = None;
+        self.box_pending_corridor_anchor = None;
+        self.box_drag_last = None;
+        self.reset_box_panel_visibility();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn toggle_box_reverse_bearings(&mut self) {
+        self.record_box_history();
+        self.box_reverse_bearings = !self.box_reverse_bearings;
+        self.hidden_box_bearing_panels = 0;
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn begin_box_corridor(&mut self, anchor: BoxAnchor) {
+        if self.box_corridors.len() >= MAX_BOX_CORRIDORS {
+            return;
+        }
+        self.box_visible = true;
+        self.box_insert_after = None;
+        self.box_pending_corridor_anchor = Some(anchor);
+        self.box_drag_last = None;
+        self.reset_box_panel_visibility();
+        self.refresh_box_capture_mode();
+        self.request_redraw();
+    }
+
+    fn add_pending_box_corridor(&mut self, end: Point) -> bool {
+        let Some(anchor) = self.box_pending_corridor_anchor.clone() else {
+            return false;
+        };
+        if self.box_corridors.len() >= MAX_BOX_CORRIDORS {
+            self.box_pending_corridor_anchor = None;
+            self.refresh_box_capture_mode();
+            return true;
+        }
+        let start = box_anchor_position(&self.box_points, self.box_closed, &anchor);
+        if vector_length(start, end) < 10.0 {
+            return true;
+        }
+        self.record_box_history();
+        self.box_corridors.push(BoxCorridor { anchor, end });
+        self.box_pending_corridor_anchor = None;
+        self.reset_box_panel_visibility();
+        self.refresh_box_capture_mode();
+        if !self.box_capture_active {
+            self.fit_window_to_content();
+        }
+        self.save_state();
+        self.request_redraw();
+        true
+    }
+
+    fn delete_box_corridor(&mut self, index: usize) {
+        if index >= self.box_corridors.len() {
+            return;
+        }
+        self.record_box_history();
+        self.box_corridors.remove(index);
+        self.reset_box_panel_visibility();
+        self.fit_window_to_content();
+        self.save_state();
+        self.request_redraw();
+    }
+
+    fn translate_box_group(&mut self, dx: f32, dy: f32) {
+        let locked = self.box_locked.clone();
+        for (index, point) in self.box_points.iter_mut().enumerate() {
+            if !locked.get(index).copied().unwrap_or(false) {
+                point.x += dx;
+                point.y += dy;
+            }
+        }
+        for corridor in &mut self.box_corridors {
+            if let BoxAnchor::Free(point) = &mut corridor.anchor {
+                point.x += dx;
+                point.y += dy;
+            }
+            corridor.end.x += dx;
+            corridor.end.y += dy;
+        }
+        self.reset_box_panel_visibility();
     }
 
     fn detect_startup_monitor(event_loop: &ActiveEventLoop) -> MonitorGeometry {
@@ -2675,7 +2892,9 @@ impl App {
     }
 
     fn box_panel_layout_with_angle_rects(&self, angle_rects: &[PanelRect]) -> BoxPanelLayout {
-        if !self.box_visible || self.box_points.len() < 2 {
+        if !self.box_visible
+            || (self.box_points.len() < 2 && self.box_corridors.is_empty())
+        {
             return BoxPanelLayout::default();
         }
         let mut avoid = angle_rects.to_vec();
@@ -2683,8 +2902,10 @@ impl App {
         layout_box_panels(
             &self.box_points,
             self.box_closed,
+            &self.box_corridors,
             self.meters_per_pixel,
             self.north_angle,
+            self.box_reverse_bearings,
             self.distance_visible,
             self.plus_degrees_visible,
             self.hidden_box_distance_panels,
@@ -2703,11 +2924,11 @@ impl App {
             return false;
         };
         match kind {
-            BoxPanelKind::Distance(index) => {
-                self.hidden_box_distance_panels |= 1u16 << index;
+            BoxPanelKind::Distance(segment) => {
+                self.hidden_box_distance_panels |= Self::box_mask_bit(segment);
             }
-            BoxPanelKind::Bearing(index) => {
-                self.hidden_box_bearing_panels |= 1u16 << index;
+            BoxPanelKind::Bearing(segment) => {
+                self.hidden_box_bearing_panels |= Self::box_mask_bit(segment);
             }
         }
         self.fit_window_to_content();
@@ -2715,10 +2936,36 @@ impl App {
         true
     }
 
+    fn normalize_box_locks(&mut self) {
+        self.box_locked.resize(self.box_points.len(), false);
+        self.box_locked.truncate(self.box_points.len());
+    }
+
+    fn box_point_locked(&self, index: usize) -> bool {
+        self.box_locked.get(index).copied().unwrap_or(false)
+    }
+
+    fn toggle_box_point_lock(&mut self, index: usize) {
+        if index >= self.box_points.len() {
+            return;
+        }
+        self.record_box_history();
+        self.normalize_box_locks();
+        self.box_locked[index] = !self.box_locked[index];
+        if self.box_locked[index] && self.active_handle == Some(BOX_HANDLE_BASE + index) {
+            self.active_handle = None;
+        }
+        self.save_state();
+        self.request_redraw();
+    }
+
     fn toggle_box_mode(&mut self) {
+        self.record_box_history();
         self.box_visible = !self.box_visible;
-        self.hidden_box_distance_panels = 0;
-        self.hidden_box_bearing_panels = 0;
+        self.box_insert_after = None;
+        self.box_pending_corridor_anchor = None;
+        self.box_drag_last = None;
+        self.reset_box_panel_visibility();
         self.refresh_box_capture_mode();
         if !self.box_capture_active {
             self.fit_window_to_content();
@@ -2727,28 +2974,80 @@ impl App {
         self.request_redraw();
     }
 
+    fn begin_box_insert_after(&mut self, index: usize) {
+        if index >= self.box_points.len() || self.box_points.len() >= MAX_BOX_POINTS {
+            return;
+        }
+        self.box_visible = true;
+        self.box_insert_after = Some(index);
+        self.box_pending_corridor_anchor = None;
+        self.box_drag_last = None;
+        self.reset_box_panel_visibility();
+        self.refresh_box_capture_mode();
+        self.request_redraw();
+    }
+
     fn add_or_close_box_point(&mut self, point: Point) -> bool {
-        if !self.box_visible || self.box_closed {
+        if !self.box_visible {
+            return false;
+        }
+
+        if self.box_pending_corridor_anchor.is_some() {
+            return self.add_pending_box_corridor(point);
+        }
+
+        if let Some(after_index) = self.box_insert_after {
+            if self.box_points.len() >= MAX_BOX_POINTS {
+                self.box_insert_after = None;
+                self.refresh_box_capture_mode();
+                return true;
+            }
+            if box_lock_at(point, &self.box_points).is_some()
+                || box_point_at(point, &self.box_points).is_some()
+            {
+                return true;
+            }
+            let insert_index = (after_index + 1).min(self.box_points.len());
+            self.record_box_history();
+            self.detach_corridor_anchors();
+            self.normalize_box_locks();
+            self.box_points.insert(insert_index, point);
+            self.box_locked.insert(insert_index, false);
+            self.box_insert_after = None;
+            self.reset_box_panel_visibility();
+            self.refresh_box_capture_mode();
+            if !self.box_capture_active {
+                self.fit_window_to_content();
+            }
+            self.save_state();
+            self.request_redraw();
+            return true;
+        }
+
+        if self.box_closed {
             return false;
         }
         if is_close_target(point, &self.box_points) {
+            self.record_box_history();
             self.box_closed = true;
-            self.hidden_box_distance_panels = 0;
-            self.hidden_box_bearing_panels = 0;
+            self.reset_box_panel_visibility();
             self.refresh_box_capture_mode();
             self.save_state();
             self.request_redraw();
             return true;
         }
-        if box_point_at(point, &self.box_points).is_some() {
+        if box_point_at(point, &self.box_points).is_some()
+            || box_lock_at(point, &self.box_points).is_some()
+        {
             return true;
         }
         if self.box_points.len() >= MAX_BOX_POINTS {
             return true;
         }
+        self.record_box_history();
         self.box_points.push(point);
-        self.hidden_box_distance_panels = 0;
-        self.hidden_box_bearing_panels = 0;
+        self.box_locked.push(false);
+        self.reset_box_panel_visibility();
         self.refresh_box_capture_mode();
         if !self.box_capture_active {
             self.fit_window_to_content();
@@ -2762,16 +3061,24 @@ impl App {
         if index >= self.box_points.len() {
             return;
         }
+        self.record_box_history();
+        self.detach_corridor_anchors();
         self.box_points.remove(index);
+        if index < self.box_locked.len() {
+            self.box_locked.remove(index);
+        }
+        self.box_insert_after = None;
+        self.box_pending_corridor_anchor = None;
         if self.box_points.len() < 3 {
             self.box_closed = false;
         }
         if self.box_points.is_empty() {
+            self.box_corridors.clear();
             self.box_visible = false;
             self.box_closed = false;
         }
-        self.hidden_box_distance_panels = 0;
-        self.hidden_box_bearing_panels = 0;
+        self.normalize_box_locks();
+        self.reset_box_panel_visibility();
         self.refresh_box_capture_mode();
         if !self.box_capture_active {
             self.fit_window_to_content();
@@ -3396,6 +3703,9 @@ impl App {
             self.box_visible,
             self.box_closed,
             &self.box_points,
+            &self.box_locked,
+            &self.box_corridors,
+            self.box_reverse_bearings,
         );
     }
 
@@ -3499,7 +3809,13 @@ impl App {
         }
 
         if self.box_visible {
-            draw_box_geometry(&mut pixmap, &self.box_points, self.box_closed);
+            draw_box_geometry(
+                &mut pixmap,
+                &self.box_points,
+                self.box_closed,
+                &self.box_locked,
+                &self.box_corridors,
+            );
             draw_box_panels(&mut pixmap, &box_layout);
         }
 
@@ -3905,8 +4221,17 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                if matches!(&event.logical_key, Key::Character(text) if text.as_str().eq_ignore_ascii_case("z"))
+                    && self.modifiers.control_key()
+                {
+                    self.undo_box();
                     return;
                 }
                 if self.distance_editor.is_some() {
@@ -3954,11 +4279,58 @@ impl ApplicationHandler for App {
                     let hwnd = hwnd_from_window(&window);
                     if self.box_visible {
                         if let Some(pos) = self.cursor_pos {
+                            if let Some(index) = box_corridor_end_at(pos, &self.box_corridors) {
+                                match unsafe {
+                                    show_box_corridor_menu(hwnd, self.box_reverse_bearings)
+                                } {
+                                    Some(MENU_ADD_BOX_CORRIDOR) => {
+                                        let anchor = BoxAnchor::Free(self.box_corridors[index].end);
+                                        self.begin_box_corridor(anchor);
+                                    }
+                                    Some(MENU_DELETE_CORRIDOR) => self.delete_box_corridor(index),
+                                    Some(MENU_DELETE_BOX_ALL) => self.delete_all_box(),
+                                    Some(MENU_OTHER_CIRCLE) => self.toggle_box_reverse_bearings(),
+                                    _ => {}
+                                }
+                                return;
+                            }
                             if let Some(index) = box_point_at(pos, &self.box_points) {
-                                if unsafe { show_box_point_menu(hwnd) }
-                                    == Some(MENU_DELETE_BOX_POINT)
-                                {
-                                    self.delete_box_point(index);
+                                match unsafe {
+                                    show_box_point_menu(hwnd, self.box_reverse_bearings)
+                                } {
+                                    Some(MENU_ADD_BOX_POINT) => self.begin_box_insert_after(index),
+                                    Some(MENU_ADD_BOX_CORRIDOR) => {
+                                        self.begin_box_corridor(BoxAnchor::Vertex(index));
+                                    }
+                                    Some(MENU_DELETE_BOX_POINT) => self.delete_box_point(index),
+                                    Some(MENU_DELETE_BOX_ALL) => self.delete_all_box(),
+                                    Some(MENU_OTHER_CIRCLE) => self.toggle_box_reverse_bearings(),
+                                    _ => {}
+                                }
+                                return;
+                            }
+                            if let Some((segment_kind, projected)) = box_segment_at(
+                                pos,
+                                &self.box_points,
+                                self.box_closed,
+                                &self.box_corridors,
+                            ) {
+                                match unsafe {
+                                    show_box_segment_menu(hwnd, self.box_reverse_bearings)
+                                } {
+                                    Some(MENU_ADD_BOX_CORRIDOR) => {
+                                        let anchor = anchor_for_segment(
+                                            segment_kind,
+                                            projected,
+                                            &self.box_points,
+                                            self.box_closed,
+                                            &self.box_corridors,
+                                        );
+                                        self.begin_box_corridor(anchor);
+                                    }
+                                    Some(MENU_DELETE_BOX_ALL) => self.delete_all_box(),
+                                    Some(MENU_OTHER_CIRCLE) => self.toggle_box_reverse_bearings(),
+                                    _ => {}
                                 }
                                 return;
                             }
@@ -4027,13 +4399,53 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some(pos) = self.cursor_pos {
-                            // While Box + is collecting points, every left click
-                            // belongs to the box tool before any other handle or
-                            // panel can consume it.
+                            if self.box_visible {
+                                if let Some(index) = box_lock_at(pos, &self.box_points) {
+                                    self.toggle_box_point_lock(index);
+                                    return;
+                                }
+                            }
+
+                            // While Box + is collecting or inserting a point,
+                            // every other free click belongs to the box tool.
                             if self.box_capture_active && self.add_or_close_box_point(pos) {
                                 self.active_handle = None;
                                 return;
                             }
+
+                            // A completed box and its corridors remain editable.
+                            if self.box_visible {
+                                if let Some(index) = box_corridor_end_at(pos, &self.box_corridors) {
+                                    self.record_box_history();
+                                    self.active_handle = Some(BOX_CORRIDOR_HANDLE_BASE + index);
+                                    return;
+                                }
+                                if let Some(index) = box_point_at(pos, &self.box_points) {
+                                    if self.box_point_locked(index) {
+                                        self.active_handle = None;
+                                    } else {
+                                        self.record_box_history();
+                                        self.active_handle = Some(BOX_HANDLE_BASE + index);
+                                    }
+                                    return;
+                                }
+                                let over_box_panel = self.box_panel_layout().hit_test(pos).is_some();
+                                if !over_box_panel
+                                    && box_segment_at(
+                                        pos,
+                                        &self.box_points,
+                                        self.box_closed,
+                                        &self.box_corridors,
+                                    )
+                                    .is_some()
+                                {
+                                    self.record_box_history();
+                                    self.box_drag_last = Some(pos);
+                                    self.active_handle = None;
+                                    return;
+                                }
+                            }
+
                             if self.north_visible {
                                 let vertex = self.points[1];
                                 if in_north_lock_button(pos, vertex, self.north_angle) {
@@ -4153,14 +4565,16 @@ impl ApplicationHandler for App {
                         }
                     }
                     ElementState::Released => {
-                        if self.active_handle.take().is_some() {
+                        let moved_handle = self.active_handle.take().is_some();
+                        let moved_box = self.box_drag_last.take().is_some();
+                        if moved_handle || moved_box {
                             self.save_state();
                         }
                     }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.active_handle.is_some() {
+                if self.active_handle.is_some() || self.box_drag_last.is_some() {
                     return;
                 }
                 let Some(cursor) = self.cursor_pos else {
@@ -4302,15 +4716,19 @@ impl ApplicationHandler for App {
                 self.course_wheel_accumulator = 0.0;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Some(Point {
+                let target = Point {
                     x: position.x as f32,
                     y: position.y as f32,
-                });
+                };
+                self.cursor_pos = Some(target);
+                if let Some(previous) = self.box_drag_last {
+                    self.translate_box_group(target.x - previous.x, target.y - previous.y);
+                    self.box_drag_last = Some(target);
+                    self.fit_window_to_content();
+                    self.request_redraw();
+                    return;
+                }
                 if let Some(index) = self.active_handle {
-                    let target = Point {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    };
                     self.move_handle(index, target);
                     self.fit_window_to_content();
                     self.request_redraw();
@@ -4436,7 +4854,12 @@ impl App {
         }
 
         if self.box_visible {
-            if let Some(box_content) = box_bounds(&self.box_points, &box_layout) {
+            if let Some(box_content) = box_bounds(
+                &self.box_points,
+                self.box_closed,
+                &self.box_corridors,
+                &box_layout,
+            ) {
                 bounds = merge_bounds(bounds, box_content);
             }
         }
@@ -4491,6 +4914,7 @@ impl App {
                 point.x += shift_x;
                 point.y += shift_y;
             }
+            translate_free_corridor_anchors(&mut self.box_corridors, shift_x, shift_y);
             if let Ok(outer) = window.outer_position() {
                 window.set_outer_position(PhysicalPosition::new(
                     outer.x - shift_x.round() as i32,
@@ -4529,6 +4953,38 @@ impl App {
     }
 
     fn move_handle(&mut self, index: usize, target: Point) {
+        if index >= BOX_CORRIDOR_HANDLE_BASE {
+            let corridor_index = index - BOX_CORRIDOR_HANDLE_BASE;
+            if self.box_visible && corridor_index < self.box_corridors.len() {
+                let previous_end = self.box_corridors[corridor_index].end;
+                self.box_corridors[corridor_index].end = target;
+                for (other_index, corridor) in self.box_corridors.iter_mut().enumerate() {
+                    if other_index == corridor_index {
+                        continue;
+                    }
+                    if let BoxAnchor::Free(anchor) = &mut corridor.anchor {
+                        if vector_length(*anchor, previous_end) <= 0.5 {
+                            *anchor = target;
+                        }
+                    }
+                }
+                self.reset_box_panel_visibility();
+            }
+            return;
+        }
+
+        if index >= BOX_HANDLE_BASE {
+            let box_index = index - BOX_HANDLE_BASE;
+            if self.box_visible
+                && box_index < self.box_points.len()
+                && !self.box_point_locked(box_index)
+            {
+                self.box_points[box_index] = target;
+                self.reset_box_panel_visibility();
+            }
+            return;
+        }
+
         if index == NORTH_HANDLE_INDEX {
             if self.north_visible && !self.north_locked {
                 let vertex = self.points[1];
