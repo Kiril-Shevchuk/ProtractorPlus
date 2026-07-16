@@ -4,7 +4,7 @@
 
 - CompanyName: `Kiril Shevchuk`
 - ProductName: `ProtractorPlus`
-- ProductVersion: `3.2.0`
+- ProductVersion: `3.2.1`
 
 Ці поля відображаються у властивостях файла, але **не є цифровим підписом**. Рядок Publisher у SmartScreen/UAC береться з Authenticode-сертифіката.
 
@@ -61,3 +61,8 @@ Get-AuthenticodeSignature .\target\release\ProtractorPlus.exe | Format-List
 ## SmartScreen
 
 Навіть коректно підписана нова збірка може тимчасово показувати SmartScreen, поки файл або сертифікат не набере репутацію. Найстабільніший шлях без SmartScreen для кінцевих користувачів — розповсюдження через Microsoft Store.
+
+
+## Важливо для SmartScreen
+
+Код програми та Windows version metadata не можуть самі прибрати повідомлення `Windows protected your PC`. Для відображення перевіреного Publisher потрібен Authenticode-підпис чинним сертифікатом, виданим на `Kiril Shevchuk`. Після додавання PFX у GitHub Secrets наявний workflow підписує і перевіряє `ProtractorPlus.exe`. Навіть підписаний новий файл може тимчасово отримувати SmartScreen-попередження, доки файл або сертифікат не матиме достатньої репутації.

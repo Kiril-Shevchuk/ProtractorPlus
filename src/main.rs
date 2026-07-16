@@ -22,8 +22,9 @@ use distance::{
 };
 use box_overlay::{
     anchor_for_segment, box_anchor_position, box_bounds, box_corridor_end_at, box_lock_at,
-    box_point_at, box_segment_at, draw_box_geometry, draw_box_panels, is_close_target,
-    layout_box_panels, load_box_state, save_box_state, translate_free_corridor_anchors,
+    box_point_at, box_segment_at, box_corridor_anchor_at, draw_box_geometry,
+    draw_box_panels, draw_corridor_anchor_preview, is_close_target,
+    layout_box_panels, load_box_state, save_box_state, snap_corridor_anchor, translate_free_corridor_anchors,
     BoxAnchor, BoxCorridor, BoxPanelKind, BoxPanelLayout, BoxSegmentKind, MAX_BOX_CORRIDORS,
     MAX_BOX_POINTS,
 };
@@ -37,13 +38,13 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::text::{draw_text, layout_text};
 use crate::win32_layered::{
     configure_overlay, ensure_topmost, hwnd_from_window, is_minimized, minimize_window,
-    present_pixmap, restore_window, set_click_through, show_context_menu, ContextMenuState,
+    present_pixmap, restore_window, set_click_through, show_context_menu, cursor_screen_position, ContextMenuState,
     MENU_BISECTOR, MENU_CLOSE, MENU_FRONT_PLUS, MENU_HYPOTENUSE, MENU_INVERSION,
     MENU_COURSE_PLUS, MENU_DISTANCE_PLUS, MENU_MINIMIZE, MENU_NORTH_PLUS, MENU_PLUS,
     MENU_PLUS_DEGREES, MENU_XTK_PLUS, MENU_BOX_PLUS, MENU_DELETE_BOX_POINT,
@@ -81,6 +82,7 @@ const COURSE_ARC_MAX_RADIUS: f32 = 50.0;
 const COURSE_LABEL_OFFSET: f32 = 12.0;
 const BOX_HANDLE_BASE: usize = 100;
 const BOX_CORRIDOR_HANDLE_BASE: usize = 200;
+const BOX_CORRIDOR_ANCHOR_HANDLE_BASE: usize = 300;
 const SPLASH_DURATION: Duration = Duration::from_secs(4);
 const SPLASH_SCREEN_FRACTION: f32 = 0.25;
 const SPLASH_MIN_SIZE: u32 = 220;
@@ -2415,6 +2417,10 @@ impl App {
             point.y += dy;
         }
         translate_free_corridor_anchors(&mut self.box_corridors, dx, dy);
+        if let Some(BoxAnchor::Free(point)) = &mut self.box_pending_corridor_anchor {
+            point.x += dx;
+            point.y += dy;
+        }
     }
 
     fn enter_box_capture_mode(&mut self) {
@@ -2430,6 +2436,12 @@ impl App {
         let Some(window) = self.window.clone() else {
             return;
         };
+        let old_position = window
+            .outer_position()
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        // The compact overlay belongs to one monitor. Expand the capture
+        // surface on that same monitor so corridor endpoints never jump to a
+        // different display in multi-monitor layouts.
         let monitor = window
             .current_monitor()
             .map(|monitor| {
@@ -2449,10 +2461,6 @@ impl App {
                 width: 1920,
                 height: 1080,
             });
-        let old_position = window
-            .outer_position()
-            .unwrap_or(PhysicalPosition::new(monitor.x, monitor.y));
-
         self.box_restore_click_through = CLICK_THROUGH.swap(false, Ordering::Relaxed);
         unsafe {
             set_click_through(hwnd_from_window(&window), false);
@@ -2526,12 +2534,29 @@ impl App {
     }
 
     fn current_box_history_state(&self) -> BoxHistoryState {
+        // Store history in absolute screen coordinates. The overlay switches
+        // between a compact window and a monitor-sized capture surface; local
+        // coordinates alone would make Ctrl+Z jump after such a transition.
+        let (origin_x, origin_y) = self
+            .window
+            .as_ref()
+            .and_then(|window| window.outer_position().ok())
+            .map(|position| (position.x as f32, position.y as f32))
+            .unwrap_or((0.0, 0.0));
+        let mut points = self.box_points.clone();
+        for point in &mut points {
+            point.x += origin_x;
+            point.y += origin_y;
+        }
+        let mut corridors = self.box_corridors.clone();
+        translate_free_corridor_anchors(&mut corridors, origin_x, origin_y);
+
         BoxHistoryState {
             visible: self.box_visible,
-            points: self.box_points.clone(),
+            points,
             locked: self.box_locked.clone(),
             closed: self.box_closed,
-            corridors: self.box_corridors.clone(),
+            corridors,
             reverse_bearings: self.box_reverse_bearings,
         }
     }
@@ -2548,11 +2573,25 @@ impl App {
         let Some(previous) = self.box_history.pop() else {
             return;
         };
+        let (origin_x, origin_y) = self
+            .window
+            .as_ref()
+            .and_then(|window| window.outer_position().ok())
+            .map(|position| (position.x as f32, position.y as f32))
+            .unwrap_or((0.0, 0.0));
+        let mut restored_points = previous.points;
+        for point in &mut restored_points {
+            point.x -= origin_x;
+            point.y -= origin_y;
+        }
+        let mut restored_corridors = previous.corridors;
+        translate_free_corridor_anchors(&mut restored_corridors, -origin_x, -origin_y);
+
         self.box_visible = previous.visible;
-        self.box_points = previous.points;
+        self.box_points = restored_points;
         self.box_locked = previous.locked;
         self.box_closed = previous.closed;
-        self.box_corridors = previous.corridors;
+        self.box_corridors = restored_corridors;
         self.box_reverse_bearings = previous.reverse_bearings;
         self.box_insert_after = None;
         self.box_pending_corridor_anchor = None;
@@ -2696,6 +2735,29 @@ impl App {
     }
 
     fn detect_startup_monitor(event_loop: &ActiveEventLoop) -> MonitorGeometry {
+        // Windows does not expose a universal "monitor that launched the app" value.
+        // The monitor under the mouse cursor at startup is the most predictable
+        // desktop convention and matches where the user initiated the launch.
+        if let Some((cursor_x, cursor_y)) = cursor_screen_position() {
+            if let Some(monitor) = event_loop.available_monitors().find(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                cursor_x >= position.x
+                    && cursor_x < position.x + size.width as i32
+                    && cursor_y >= position.y
+                    && cursor_y < position.y + size.height as i32
+            }) {
+                let position = monitor.position();
+                let size = monitor.size();
+                return MonitorGeometry {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                };
+            }
+        }
+
         let monitor = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next());
@@ -3816,6 +3878,10 @@ impl App {
                 &self.box_locked,
                 &self.box_corridors,
             );
+            if let Some(anchor) = &self.box_pending_corridor_anchor {
+                let start = box_anchor_position(&self.box_points, self.box_closed, anchor);
+                draw_corridor_anchor_preview(&mut pixmap, start);
+            }
             draw_box_panels(&mut pixmap, &box_layout);
         }
 
@@ -4228,9 +4294,16 @@ impl ApplicationHandler for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if matches!(&event.logical_key, Key::Character(text) if text.as_str().eq_ignore_ascii_case("z"))
-                    && self.modifiers.control_key()
-                {
+                let undo_key = matches!(
+                    &event.physical_key,
+                    &PhysicalKey::Code(KeyCode::KeyZ)
+                ) || matches!(
+                    &event.logical_key,
+                    Key::Character(text)
+                        if text.as_str().eq_ignore_ascii_case("z")
+                            || text.as_str() == "\u{1a}"
+                );
+                if undo_key && self.modifiers.control_key() && !event.repeat {
                     self.undo_box();
                     return;
                 }
@@ -4415,6 +4488,17 @@ impl ApplicationHandler for App {
 
                             // A completed box and its corridors remain editable.
                             if self.box_visible {
+                                if let Some(index) = box_corridor_anchor_at(
+                                    pos,
+                                    &self.box_points,
+                                    self.box_closed,
+                                    &self.box_corridors,
+                                ) {
+                                    self.record_box_history();
+                                    self.active_handle =
+                                        Some(BOX_CORRIDOR_ANCHOR_HANDLE_BASE + index);
+                                    return;
+                                }
                                 if let Some(index) = box_corridor_end_at(pos, &self.box_corridors) {
                                     self.record_box_history();
                                     self.active_handle = Some(BOX_CORRIDOR_HANDLE_BASE + index);
@@ -4953,6 +5037,22 @@ impl App {
     }
 
     fn move_handle(&mut self, index: usize, target: Point) {
+        if index >= BOX_CORRIDOR_ANCHOR_HANDLE_BASE {
+            let corridor_index = index - BOX_CORRIDOR_ANCHOR_HANDLE_BASE;
+            if self.box_visible && corridor_index < self.box_corridors.len() {
+                let anchor = snap_corridor_anchor(
+                    target,
+                    &self.box_points,
+                    self.box_closed,
+                    &self.box_corridors,
+                    corridor_index,
+                );
+                self.box_corridors[corridor_index].anchor = anchor;
+                self.reset_box_panel_visibility();
+            }
+            return;
+        }
+
         if index >= BOX_CORRIDOR_HANDLE_BASE {
             let corridor_index = index - BOX_CORRIDOR_HANDLE_BASE;
             if self.box_visible && corridor_index < self.box_corridors.len() {

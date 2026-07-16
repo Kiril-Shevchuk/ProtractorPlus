@@ -52,6 +52,15 @@ pub struct ContextMenuState {
     pub box_plus: bool,
 }
 
+
+pub fn cursor_screen_position() -> Option<(i32, i32)> {
+    unsafe {
+        let mut point = POINT::default();
+        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).ok()?;
+        Some((point.x, point.y))
+    }
+}
+
 pub fn hwnd_from_window(window: &Window) -> HWND {
     match window.window_handle().expect("window handle").as_raw() {
         RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as *mut core::ffi::c_void),

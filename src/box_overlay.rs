@@ -10,6 +10,8 @@ pub const MAX_BOX_POINTS: usize = 10;
 pub const MAX_BOX_CORRIDORS: usize = 10;
 const MARKER_RADIUS: f32 = 7.0;
 const MARKER_HIT_RADIUS: f32 = 12.0;
+const CORRIDOR_ANCHOR_RADIUS: f32 = 4.2;
+const CORRIDOR_ANCHOR_HIT_RADIUS: f32 = 10.0;
 const SEGMENT_HIT_RADIUS: f32 = 8.0;
 const NUMBER_FONT_SIZE: f32 = 10.5;
 const SEGMENT_WIDTH: f32 = 1.3;
@@ -190,9 +192,31 @@ pub fn load_box_state(path: &Path) -> BoxSavedState {
         }
     }
 
+    let closed = closed && points.len() >= 3;
+    locked.resize(points.len(), false);
+    locked.truncate(points.len());
+    let edge_count = if points.len() < 2 {
+        0
+    } else if closed {
+        points.len()
+    } else {
+        points.len() - 1
+    };
+    corridors.retain(|corridor| {
+        corridor.end.x.is_finite()
+            && corridor.end.y.is_finite()
+            && match corridor.anchor {
+                BoxAnchor::Vertex(index) => index < points.len(),
+                BoxAnchor::Segment { index, t } => {
+                    index < edge_count && t.is_finite()
+                }
+                BoxAnchor::Free(point) => point.x.is_finite() && point.y.is_finite(),
+            }
+    });
+
     BoxSavedState {
         visible,
-        closed: closed && points.len() >= 3,
+        closed,
         points,
         locked,
         corridors,
@@ -271,6 +295,70 @@ pub fn box_corridor_end_at(point: Point, corridors: &[BoxCorridor]) -> Option<us
         let dy = corridor.end.y - point.y;
         (dx * dx + dy * dy <= MARKER_HIT_RADIUS * MARKER_HIT_RADIUS).then_some(index)
     })
+}
+
+
+pub fn box_corridor_anchor_at(
+    point: Point,
+    points: &[Point],
+    closed: bool,
+    corridors: &[BoxCorridor],
+) -> Option<usize> {
+    corridors.iter().enumerate().find_map(|(index, corridor)| {
+        let anchor = box_anchor_position(points, closed, &corridor.anchor);
+        let dx = anchor.x - point.x;
+        let dy = anchor.y - point.y;
+        (dx * dx + dy * dy
+            <= CORRIDOR_ANCHOR_HIT_RADIUS * CORRIDOR_ANCHOR_HIT_RADIUS)
+            .then_some(index)
+    })
+}
+
+pub fn snap_corridor_anchor(
+    point: Point,
+    points: &[Point],
+    closed: bool,
+    corridors: &[BoxCorridor],
+    moving_corridor: usize,
+) -> BoxAnchor {
+    let mut best: Option<(f32, BoxAnchor)> = None;
+    let mut consider = |distance: f32, anchor: BoxAnchor| {
+        if distance.is_finite()
+            && best
+                .as_ref()
+                .map(|(best_distance, _)| distance < *best_distance)
+                .unwrap_or(true)
+        {
+            best = Some((distance, anchor));
+        }
+    };
+
+    for (index, candidate) in points.iter().enumerate() {
+        consider(length(point, *candidate), BoxAnchor::Vertex(index));
+    }
+
+    for index in 0..segment_count(points, closed) {
+        if let Some((from, to)) = segment(points, closed, index) {
+            let (distance, t) = distance_to_segment(point, from, to);
+            consider(distance, BoxAnchor::Segment { index, t });
+        }
+    }
+
+    for (index, corridor) in corridors.iter().enumerate() {
+        if index == moving_corridor {
+            continue;
+        }
+        consider(length(point, corridor.end), BoxAnchor::Free(corridor.end));
+        let start = box_anchor_position(points, closed, &corridor.anchor);
+        let (distance, t) = distance_to_segment(point, start, corridor.end);
+        let projected = Point {
+            x: start.x + (corridor.end.x - start.x) * t,
+            y: start.y + (corridor.end.y - start.y) * t,
+        };
+        consider(distance, BoxAnchor::Free(projected));
+    }
+
+    best.map(|(_, anchor)| anchor).unwrap_or(BoxAnchor::Free(point))
 }
 
 fn lock_center(point: Point) -> Point {
@@ -613,6 +701,30 @@ fn draw_lock_icon(pixmap: &mut Pixmap, point: Point, locked: bool) {
     }
 }
 
+fn draw_corridor_anchor_marker(pixmap: &mut Pixmap, center: Point) {
+    let mut outer = PathBuilder::new();
+    outer.push_circle(center.x, center.y, CORRIDOR_ANCHOR_RADIUS + 1.5);
+    if let Some(path) = outer.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(255, 255, 255, 235));
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+
+    let mut inner = PathBuilder::new();
+    inner.push_circle(center.x, center.y, CORRIDOR_ANCHOR_RADIUS);
+    if let Some(path) = inner.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(18, 18, 18, 250));
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+pub fn draw_corridor_anchor_preview(pixmap: &mut Pixmap, center: Point) {
+    draw_corridor_anchor_marker(pixmap, center);
+}
+
 pub fn draw_box_geometry(
     pixmap: &mut Pixmap,
     points: &[Point],
@@ -641,6 +753,12 @@ pub fn draw_box_geometry(
     }
     for (index, corridor) in corridors.iter().enumerate() {
         draw_triangle_marker(pixmap, corridor.end, &format!("C{}", index + 1));
+    }
+    // Draw the corridor origin last so the black attachment point remains
+    // visible even when it is snapped directly onto a magenta triangle.
+    for corridor in corridors {
+        let start = box_anchor_position(points, closed, &corridor.anchor);
+        draw_corridor_anchor_marker(pixmap, start);
     }
 }
 

@@ -28,9 +28,10 @@ fn main() {
             .set("FileDescription", "ProtractorPlus")
             .set("ProductName", "ProtractorPlus")
             .set("CompanyName", "Kiril Shevchuk")
+            .set("Publisher", "Kiril Shevchuk")
             .set("LegalCopyright", "Copyright (c) 2026 Kiril Shevchuk")
-            .set("FileVersion", "3.2.0.0")
-            .set("ProductVersion", "3.2.0")
+            .set("FileVersion", "3.2.1.0")
+            .set("ProductVersion", "3.2.1")
             .set("InternalName", "ProtractorPlus.exe")
             .set("OriginalFilename", "ProtractorPlus.exe");
 

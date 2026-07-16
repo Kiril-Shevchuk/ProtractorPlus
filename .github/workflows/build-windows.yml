@@ -26,8 +26,13 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      - name: Validate signing configuration
+        if: ${{ (env.WINDOWS_CERTIFICATE_BASE64 != '' && env.WINDOWS_CERTIFICATE_PASSWORD == '') || (env.WINDOWS_CERTIFICATE_BASE64 == '' && env.WINDOWS_CERTIFICATE_PASSWORD != '') }}
+        shell: pwsh
+        run: throw "Both WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD must be configured together."
+
       - name: Sign executable when certificate is configured
-        if: ${{ env.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        if: ${{ env.WINDOWS_CERTIFICATE_BASE64 != '' && env.WINDOWS_CERTIFICATE_PASSWORD != '' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -42,6 +47,17 @@ jobs:
           & $signTool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target/release/ProtractorPlus.exe
           & $signTool.FullName verify /pa /v target/release/ProtractorPlus.exe
           Remove-Item $pfxPath -Force
+
+      - name: Report Authenticode status
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature target/release/ProtractorPlus.exe
+          Write-Host "Authenticode status: $($signature.Status)"
+          if ($signature.SignerCertificate) {
+            Write-Host "Publisher: $($signature.SignerCertificate.Subject)"
+          } else {
+            Write-Warning "The executable is unsigned. Configure the certificate secrets described in SIGNING.md to identify the publisher."
+          }
 
       - name: Upload executable
         uses: actions/upload-artifact@v6
