@@ -4,7 +4,7 @@
 
 - CompanyName: `Kiril Shevchuk`
 - ProductName: `ProtractorPlus`
-- ProductVersion: `2.8.0`
+- ProductVersion: `3.2.0`
 
 Ці поля відображаються у властивостях файла, але **не є цифровим підписом**. Рядок Publisher у SmartScreen/UAC береться з Authenticode-сертифіката.
 
